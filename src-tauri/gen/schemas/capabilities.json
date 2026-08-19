@@ -1,0 +1,1 @@
+{"main-window":{"identifier":"main-window","description":"Only grants the main window core desktop capabilities. Sidecars are invoked by validated Rust commands.","local":true,"windows":["main"],"permissions":["core:default"]}}

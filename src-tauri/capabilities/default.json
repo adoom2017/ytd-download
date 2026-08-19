@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Only grants the main window core desktop capabilities. Sidecars are invoked by validated Rust commands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
+

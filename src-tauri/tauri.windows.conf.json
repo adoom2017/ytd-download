@@ -1,0 +1,12 @@
+{
+  "bundle": {
+    "targets": ["nsis"],
+    "windows": {
+      "nsis": {
+        "installerIcon": null,
+        "installMode": "currentUser"
+      }
+    }
+  }
+}
+

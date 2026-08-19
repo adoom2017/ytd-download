@@ -1,0 +1,73 @@
+name: Build desktop test packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: streamnest-windows-x64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: streamnest-macos-intel
+          - os: macos-15
+            target: aarch64-apple-darwin
+            artifact: streamnest-macos-apple-silicon
+    runs-on: ${{ matrix.os }}
+    env:
+      TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test frontend
+        run: pnpm test
+
+      - name: Test Rust core
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Prepare verified sidecars
+        run: pnpm sidecars
+
+      - name: Build desktop package
+        run: pnpm tauri build --target ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*
+            src-tauri/THIRD_PARTY_NOTICES.md
+

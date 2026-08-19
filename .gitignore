@@ -1,0 +1,11 @@
+node_modules/
+.pnpm-store/
+dist/
+.vite/
+coverage/
+src-tauri/target/
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+*.log
+.DS_Store
+.sidecar-cache/

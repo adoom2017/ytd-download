@@ -1,0 +1,180 @@
+use std::{fs, path::{Path, PathBuf}};
+
+use chrono::Utc;
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+
+use crate::{AppError, AppResult, models::{DownloadTask, TaskStatus}};
+
+#[derive(Debug, Clone)]
+pub struct Database {
+    path: PathBuf,
+}
+
+impl Database {
+    pub fn open(app_data_dir: &Path) -> AppResult<Self> {
+        fs::create_dir_all(app_data_dir)?;
+        let database = Self { path: app_data_dir.join("streamnest.sqlite3") };
+        database.migrate()?;
+        database.recover_interrupted()?;
+        Ok(database)
+    }
+
+    fn connect(&self) -> AppResult<Connection> {
+        let connection = Connection::open(&self.path)?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(connection)
+    }
+
+    fn migrate(&self) -> AppResult<()> {
+        let connection = self.connect()?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, created_at);
+            INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, datetime('now'));"
+        )?;
+        Ok(())
+    }
+
+    fn recover_interrupted(&self) -> AppResult<()> {
+        let mut tasks = self.list_tasks()?;
+        for task in &mut tasks {
+            if matches!(task.status, TaskStatus::Resolving | TaskStatus::Downloading | TaskStatus::Processing) {
+                task.status = TaskStatus::Paused;
+                task.progress.stage = "上次运行被中断，可继续下载".into();
+                task.error = None;
+                task.updated_at = Utc::now().to_rfc3339();
+                self.save_task(task)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn insert_task(&self, task: &DownloadTask) -> AppResult<()> {
+        let payload = serde_json::to_string(task)?;
+        self.connect()?.execute(
+            "INSERT INTO tasks(id, status, payload, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![task.id, task.status.as_db(), payload, task.created_at, task.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_task(&self, task: &DownloadTask) -> AppResult<()> {
+        let payload = serde_json::to_string(task)?;
+        self.connect()?.execute(
+            "UPDATE tasks SET status=?2, payload=?3, updated_at=?4 WHERE id=?1",
+            params![task.id, task.status.as_db(), payload, task.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn task(&self, id: &str) -> AppResult<DownloadTask> {
+        let payload: Option<String> = self.connect()?.query_row(
+            "SELECT payload FROM tasks WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        ).optional()?;
+        payload.map(|json| serde_json::from_str(&json)).transpose()?.ok_or_else(|| AppError::Validation("任务不存在".into()))
+    }
+
+    pub fn list_tasks(&self) -> AppResult<Vec<DownloadTask>> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare("SELECT payload FROM tasks ORDER BY created_at DESC")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            let payload = row?;
+            tasks.push(serde_json::from_str(&payload)?);
+        }
+        Ok(tasks)
+    }
+
+    pub fn claim_next_queued(&self) -> AppResult<Option<DownloadTask>> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let payload: Option<String> = transaction.query_row(
+            "SELECT payload FROM tasks WHERE status='queued' ORDER BY created_at ASC LIMIT 1",
+            [],
+            |row| row.get(0),
+        ).optional()?;
+        let Some(payload) = payload else { transaction.commit()?; return Ok(None); };
+        let mut task: DownloadTask = serde_json::from_str(&payload)?;
+        task.status = TaskStatus::Resolving;
+        task.progress.stage = "正在解析视频信息".into();
+        task.updated_at = Utc::now().to_rfc3339();
+        let next_payload = serde_json::to_string(&task)?;
+        transaction.execute(
+            "UPDATE tasks SET status='resolving', payload=?2, updated_at=?3 WHERE id=?1 AND status='queued'",
+            params![task.id, next_payload, task.updated_at],
+        )?;
+        transaction.commit()?;
+        Ok(Some(task))
+    }
+
+    pub fn delete_completed(&self) -> AppResult<()> {
+        self.connect()?.execute("DELETE FROM tasks WHERE status='completed'", [])?;
+        Ok(())
+    }
+
+    pub fn setting(&self, key: &str) -> AppResult<Option<String>> {
+        Ok(self.connect()?.query_row("SELECT value FROM settings WHERE key=?1", [key], |row| row.get(0)).optional()?)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> AppResult<()> {
+        self.connect()?.execute(
+            "INSERT INTO settings(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{DownloadPreset, TaskProgress};
+
+    fn sample_task(status: TaskStatus) -> DownloadTask {
+        let now = Utc::now().to_rfc3339();
+        DownloadTask {
+            id: "task-1".into(), video_id: "M7lc1UVf-VE".into(), title: "示例".into(), channel: "频道".into(),
+            thumbnail_url: "https://example.test/thumb.jpg".into(), webpage_url: "https://www.youtube.com/watch?v=M7lc1UVf-VE".into(),
+            preset: DownloadPreset::Video720, output_directory: "downloads".into(), output_path: None, status,
+            progress: TaskProgress::default(), error: None, created_at: now.clone(), updated_at: now,
+        }
+    }
+
+    #[test]
+    fn persists_and_claims_queue_in_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        db.insert_task(&sample_task(TaskStatus::Queued)).unwrap();
+        let claimed = db.claim_next_queued().unwrap().unwrap();
+        assert_eq!(claimed.status, TaskStatus::Resolving);
+        assert!(db.claim_next_queued().unwrap().is_none());
+    }
+
+    #[test]
+    fn recovers_active_tasks_as_paused() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        db.insert_task(&sample_task(TaskStatus::Downloading)).unwrap();
+        db.recover_interrupted().unwrap();
+        assert_eq!(db.task("task-1").unwrap().status, TaskStatus::Paused);
+    }
+}
