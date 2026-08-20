@@ -27,13 +27,13 @@ jobs:
     env:
       TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -53,16 +53,19 @@ jobs:
       - name: Test frontend
         run: pnpm test
 
-      - name: Test Rust core
-        run: cargo test --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
-
+      # Tauri validates every configured external binary while compiling the
+      # generated context, including during `cargo test`. A fresh runner does
+      # not have these gitignored files until this step has completed.
       - name: Prepare verified sidecars
         run: pnpm sidecars
+
+      - name: Test Rust core
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
 
       - name: Build desktop package
         run: pnpm tauri build --target ${{ matrix.target }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           if-no-files-found: error
@@ -70,4 +73,3 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*
             src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*
             src-tauri/THIRD_PARTY_NOTICES.md
-
