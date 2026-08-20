@@ -52,6 +52,15 @@ pnpm tauri:build
 
 macOS 安装包必须在对应 macOS runner 上生成。未签名测试包会触发 Windows SmartScreen 或 macOS Gatekeeper 警告。
 
+### 发布 GitHub Release
+
+三个目标平台全部构建成功后，可通过以下任一方式自动创建 Release，并上传 Windows 安装包、macOS Intel/Apple Silicon DMG 与第三方许可证清单：
+
+- 推送语义化版本标签，例如 `git tag v0.1.0` 后执行 `git push upstream v0.1.0`。
+- 在 GitHub Actions 中手动运行 `Build desktop test packages`，并填写 `release_tag`（例如 `v0.1.0`）。
+
+手动运行时将 `release_tag` 留空，只会保留 Actions 构建产物，不会创建 GitHub Release。任一平台构建失败时也不会发布不完整版本。
+
 ## 数据与进程模型
 
 - 数据库位于操作系统应用数据目录下的 `streamnest.sqlite3`。
