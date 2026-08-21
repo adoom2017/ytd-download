@@ -17,7 +17,7 @@ const sections: Array<{ title: string; statuses: TaskStatus[]; icon: typeof Down
 ];
 
 export function TasksView({ tasks, onChanged, onError }: TasksViewProps) {
-  async function act(action: "pause" | "resume" | "cancel" | "retry", id: string) {
+  async function act(action: "pause" | "resume" | "cancel" | "retry" | "delete", id: string) {
     try {
       await taskAction(action, id);
       onChanged();
@@ -94,12 +94,13 @@ function Stat({ label, value, tone = "default" }: { label: string; value: number
 
 function TaskRow({ task, onAction, onError }: {
   task: DownloadTask;
-  onAction: (action: "pause" | "resume" | "cancel" | "retry", id: string) => Promise<void>;
+  onAction: (action: "pause" | "resume" | "cancel" | "retry" | "delete", id: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const canPause = ["resolving", "downloading", "processing"].includes(task.status);
   const canResume = task.status === "paused";
   const canRetry = ["failed", "canceled"].includes(task.status);
+  const canDelete = ["completed", "failed", "canceled"].includes(task.status);
   const inProgress = ["resolving", "downloading", "processing"].includes(task.status);
 
   async function open(reveal: boolean) {
@@ -134,6 +135,7 @@ function TaskRow({ task, onAction, onError }: {
         {task.status === "completed" ? <button className="icon-button" type="button" aria-label={`打开 ${task.title} 所在文件夹`} onClick={() => void open(true)}><FolderOpen size={18} /></button> : null}
         {!["completed", "failed", "canceled"].includes(task.status) ? <button className="icon-button danger" type="button" aria-label={`取消 ${task.title}`} onClick={() => void onAction("cancel", task.id)}><X size={18} /></button> : null}
         {task.status === "completed" ? <button className="icon-button" type="button" aria-label={`打开 ${task.title}`} onClick={() => void open(false)}><MoreHorizontal size={18} /></button> : null}
+        {canDelete ? <button className="icon-button danger" type="button" title="仅删除任务记录，不删除已下载文件" aria-label={`删除任务记录 ${task.title}`} onClick={() => void onAction("delete", task.id)}><Trash2 size={18} /></button> : null}
       </div>
     </article>
   );
@@ -142,4 +144,3 @@ function TaskRow({ task, onAction, onError }: {
 function StatusPill({ status }: { status: TaskStatus }) {
   return <span className={`status-pill status-${status}`}><span />{statusLabels[status]}</span>;
 }
-

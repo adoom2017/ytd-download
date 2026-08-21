@@ -173,6 +173,21 @@ impl Database {
         Ok(())
     }
 
+    pub fn delete_task(&self, id: &str) -> AppResult<()> {
+        let task = self.task(id)?;
+        if !matches!(
+            task.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Canceled
+        ) {
+            return Err(AppError::Validation(
+                "只能删除已完成、失败或已取消的任务记录".into(),
+            ));
+        }
+        self.connect()?
+            .execute("DELETE FROM tasks WHERE id=?1", [id])?;
+        Ok(())
+    }
+
     pub fn setting(&self, key: &str) -> AppResult<Option<String>> {
         Ok(self
             .connect()?
@@ -255,5 +270,23 @@ mod tests {
             db.task("task-1").unwrap().output_path,
             Some(final_file.to_string_lossy().to_string())
         );
+    }
+
+    #[test]
+    fn deletes_only_terminal_task_records() {
+        let completed_dir = tempfile::tempdir().unwrap();
+        let completed_db = Database::open(completed_dir.path()).unwrap();
+        completed_db
+            .insert_task(&sample_task(TaskStatus::Completed))
+            .unwrap();
+        completed_db.delete_task("task-1").unwrap();
+        assert!(completed_db.task("task-1").is_err());
+
+        let active_dir = tempfile::tempdir().unwrap();
+        let active_db = Database::open(active_dir.path()).unwrap();
+        active_db
+            .insert_task(&sample_task(TaskStatus::Queued))
+            .unwrap();
+        assert!(active_db.delete_task("task-1").is_err());
     }
 }

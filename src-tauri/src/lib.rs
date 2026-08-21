@@ -10,6 +10,9 @@ use std::{
     process::Command,
 };
 
+#[cfg(target_os = "windows")]
+use std::ffi::OsString;
+
 use chrono::Utc;
 use downloader::{ControlAction, Scheduler};
 use models::{
@@ -244,6 +247,11 @@ fn clear_completed_tasks(state: State<'_, Scheduler>) -> AppResult<()> {
 }
 
 #[tauri::command]
+fn delete_task(state: State<'_, Scheduler>, task_id: String) -> AppResult<()> {
+    state.database().delete_task(&task_id)
+}
+
+#[tauri::command]
 async fn choose_download_directory(state: State<'_, Scheduler>) -> AppResult<Option<String>> {
     let picked = tauri::async_runtime::spawn_blocking(|| {
         rfd::FileDialog::new()
@@ -437,34 +445,53 @@ fn user_facing_tool_error(stderr: &str) -> String {
 
 fn open_path(path: &Path, reveal: bool) -> AppResult<()> {
     #[cfg(target_os = "windows")]
-    let status = if reveal {
-        Command::new("explorer.exe")
-            .arg(format!("/select,{}", path.display()))
-            .status()?
-    } else {
+    {
+        if reveal {
+            // Explorer can return a non-zero exit code after successfully
+            // handing the request to an existing Explorer process. Spawning
+            // is the reliable success boundary; Command also quotes paths
+            // containing spaces or non-ASCII text.
+            Command::new("explorer.exe")
+                .arg(windows_reveal_argument(path))
+                .spawn()
+                .map_err(|error| {
+                    AppError::Runtime(format!("系统无法打开文件所在位置：{error}"))
+                })?;
+            return Ok(());
+        }
         open::that(path)
             .map_err(|error| AppError::Runtime(format!("系统无法打开该文件：{error}")))?;
         return Ok(());
-    };
-    #[cfg(target_os = "macos")]
-    let status = if reveal {
-        Command::new("open").arg("-R").arg(path).status()?
-    } else {
-        Command::new("open").arg(path).status()?
-    };
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    let status = Command::new("xdg-open")
-        .arg(if path.is_dir() {
-            path
-        } else {
-            path.parent().unwrap_or(path)
-        })
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(AppError::Runtime("系统无法打开该路径".into()))
     }
+    #[cfg(not(target_os = "windows"))]
+    {
+        #[cfg(target_os = "macos")]
+        let status = if reveal {
+            Command::new("open").arg("-R").arg(path).status()?
+        } else {
+            Command::new("open").arg(path).status()?
+        };
+        #[cfg(not(target_os = "macos"))]
+        let status = Command::new("xdg-open")
+            .arg(if path.is_dir() {
+                path
+            } else {
+                path.parent().unwrap_or(path)
+            })
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(AppError::Runtime("系统无法打开该路径".into()))
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_reveal_argument(path: &Path) -> OsString {
+    let mut argument = OsString::from("/select,");
+    argument.push(path.as_os_str());
+    argument
 }
 
 pub fn run() {
@@ -490,6 +517,7 @@ pub fn run() {
             cancel_task,
             retry_task,
             clear_completed_tasks,
+            delete_task,
             choose_download_directory,
             open_output_path,
             get_settings,
@@ -502,6 +530,16 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn preserves_spaces_and_unicode_in_explorer_reveal_argument() {
+        let path = Path::new(r"C:\Users\测试\YouTube Downloads\中文 视频.mp4");
+        assert_eq!(
+            windows_reveal_argument(path),
+            OsString::from(r"/select,C:\Users\测试\YouTube Downloads\中文 视频.mp4")
+        );
+    }
 
     #[test]
     fn validates_only_youtube_video_id_shape() {
