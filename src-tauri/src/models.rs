@@ -160,10 +160,18 @@ impl YtVideo {
     pub fn into_summary(self) -> Option<VideoSummary> {
         let id = self.id?;
         Some(VideoSummary {
-            webpage_url: self.webpage_url.or(self.original_url).unwrap_or_else(|| format!("https://www.youtube.com/watch?v={id}")),
-            thumbnail_url: self.thumbnail.unwrap_or_else(|| format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")),
+            webpage_url: self
+                .webpage_url
+                .or(self.original_url)
+                .unwrap_or_else(|| format!("https://www.youtube.com/watch?v={id}")),
+            thumbnail_url: self
+                .thumbnail
+                .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")),
             title: self.title.unwrap_or_else(|| "无标题视频".into()),
-            channel: self.channel.or(self.uploader).unwrap_or_else(|| "未知频道".into()),
+            channel: self
+                .channel
+                .or(self.uploader)
+                .unwrap_or_else(|| "未知频道".into()),
             duration_seconds: self.duration,
             live_status: self.live_status,
             id,

@@ -5,12 +5,16 @@ use std::os::windows::process::CommandExt;
 
 use chrono::Utc;
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_shell::{process::{CommandChild, CommandEvent}, ShellExt};
+use tauri_plugin_shell::{
+    process::{CommandChild, CommandEvent},
+    ShellExt,
+};
 use tokio::sync::{watch, Mutex, Semaphore};
 
 use crate::{
     db::Database,
     models::{DownloadPreset, DownloadTask, TaskStatus},
+    output::resolve_output_path,
     progress::{parse_output_line, ParsedLine},
     AppError, AppResult,
 };
@@ -42,20 +46,29 @@ impl Scheduler {
         }
     }
 
-    pub fn database(&self) -> &Database { &self.database }
+    pub fn database(&self) -> &Database {
+        &self.database
+    }
 
     pub fn kick(&self, app: AppHandle) {
         let scheduler = self.clone();
-        tauri::async_runtime::spawn(async move { scheduler.schedule(app).await; });
+        tauri::async_runtime::spawn(async move {
+            scheduler.schedule(app).await;
+        });
     }
 
     pub async fn schedule(&self, app: AppHandle) {
         let _guard = self.lock.lock().await;
         loop {
-            let Ok(permit) = self.semaphore.clone().try_acquire_owned() else { break; };
+            let Ok(permit) = self.semaphore.clone().try_acquire_owned() else {
+                break;
+            };
             let task = match self.database.claim_next_queued() {
                 Ok(Some(task)) => task,
-                Ok(None) => { drop(permit); break; }
+                Ok(None) => {
+                    drop(permit);
+                    break;
+                }
                 Err(error) => {
                     eprintln!("failed to claim task: {error}");
                     drop(permit);
@@ -75,7 +88,10 @@ impl Scheduler {
 
     async fn run_task(&self, app: AppHandle, mut task: DownloadTask) {
         let (control_tx, mut control_rx) = watch::channel(ControlAction::Run);
-        self.controls.lock().await.insert(task.id.clone(), control_tx);
+        self.controls
+            .lock()
+            .await
+            .insert(task.id.clone(), control_tx);
 
         let proxy_url = match self.database.setting("proxy_url") {
             Ok(value) => value.filter(|proxy| !proxy.trim().is_empty()),
@@ -181,12 +197,17 @@ impl Scheduler {
                         }
                         CommandEvent::Terminated(payload) => {
                             if payload.code == Some(0) {
-                                task.status = TaskStatus::Completed;
-                                task.progress.percent = 100.0;
-                                task.progress.stage = "下载完成".into();
-                                task.error = None;
-                                task.updated_at = Utc::now().to_rfc3339();
-                                let _ = self.persist_emit(&app, &task);
+                                if let Some(path) = resolve_output_path(&task) {
+                                    task.output_path = Some(path.to_string_lossy().to_string());
+                                    task.status = TaskStatus::Completed;
+                                    task.progress.percent = 100.0;
+                                    task.progress.stage = "下载完成".into();
+                                    task.error = None;
+                                    task.updated_at = Utc::now().to_rfc3339();
+                                    let _ = self.persist_emit(&app, &task);
+                                } else {
+                                    self.fail(&app, &mut task, "下载进程已结束，但没有找到最终输出文件。请重试任务。".into());
+                                }
                             } else {
                                 self.fail(&app, &mut task, download_failure_message(&stderr, payload.code));
                             }
@@ -200,12 +221,19 @@ impl Scheduler {
         self.controls.lock().await.remove(&task.id);
     }
 
-    pub async fn control(&self, app: &AppHandle, task_id: &str, action: ControlAction) -> AppResult<()> {
+    pub async fn control(
+        &self,
+        app: &AppHandle,
+        task_id: &str,
+        action: ControlAction,
+    ) -> AppResult<()> {
         let mut task = self.database.task(task_id)?;
         match action {
             ControlAction::Pause => {
                 if let Some(sender) = self.controls.lock().await.get(task_id) {
-                    sender.send(ControlAction::Pause).map_err(|_| AppError::Runtime("任务已经停止".into()))?;
+                    sender
+                        .send(ControlAction::Pause)
+                        .map_err(|_| AppError::Runtime("任务已经停止".into()))?;
                 } else if task.status == TaskStatus::Queued {
                     task.status = TaskStatus::Paused;
                     task.progress.stage = "已暂停".into();
@@ -217,7 +245,9 @@ impl Scheduler {
             }
             ControlAction::Cancel => {
                 if let Some(sender) = self.controls.lock().await.get(task_id) {
-                    sender.send(ControlAction::Cancel).map_err(|_| AppError::Runtime("任务已经停止".into()))?;
+                    sender
+                        .send(ControlAction::Cancel)
+                        .map_err(|_| AppError::Runtime("任务已经停止".into()))?;
                 } else if matches!(task.status, TaskStatus::Queued | TaskStatus::Paused) {
                     task.status = TaskStatus::Canceled;
                     task.progress.stage = "已取消".into();
@@ -263,10 +293,16 @@ pub fn emit_task(app: &AppHandle, task: &DownloadTask) {
     let _ = app.emit("download-task-updated", task);
 }
 
-pub fn download_arguments(task: &DownloadTask, ffmpeg: &PathBuf, proxy_url: Option<&str>) -> Vec<String> {
+pub fn download_arguments(
+    task: &DownloadTask,
+    ffmpeg: &PathBuf,
+    proxy_url: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         "--ignore-config".into(),
         "--no-update".into(),
+        "--encoding".into(),
+        "utf-8".into(),
         "--newline".into(),
         "--continue".into(),
         "--no-overwrites".into(),
@@ -300,13 +336,32 @@ pub fn download_arguments(task: &DownloadTask, ffmpeg: &PathBuf, proxy_url: Opti
         DownloadPreset::Video720 => add_video_preset(&mut args, 720),
         DownloadPreset::Video1080 => add_video_preset(&mut args, 1080),
         DownloadPreset::VideoBest => {
-            args.extend(["--format".into(), "bestvideo+bestaudio/best".into(), "--merge-output-format".into(), "mkv".into()]);
+            args.extend([
+                "--format".into(),
+                "bestvideo+bestaudio/best".into(),
+                "--merge-output-format".into(),
+                "mkv".into(),
+            ]);
         }
         DownloadPreset::AudioM4a => {
-            args.extend(["--format".into(), "bestaudio[ext=m4a]/bestaudio".into(), "--extract-audio".into(), "--audio-format".into(), "m4a".into()]);
+            args.extend([
+                "--format".into(),
+                "bestaudio[ext=m4a]/bestaudio".into(),
+                "--extract-audio".into(),
+                "--audio-format".into(),
+                "m4a".into(),
+            ]);
         }
         DownloadPreset::AudioMp3 => {
-            args.extend(["--format".into(), "bestaudio".into(), "--extract-audio".into(), "--audio-format".into(), "mp3".into(), "--audio-quality".into(), "192K".into()]);
+            args.extend([
+                "--format".into(),
+                "bestaudio".into(),
+                "--extract-audio".into(),
+                "--audio-format".into(),
+                "mp3".into(),
+                "--audio-quality".into(),
+                "192K".into(),
+            ]);
         }
     }
     if let Some(proxy_url) = proxy_url.filter(|value| !value.trim().is_empty()) {
@@ -345,7 +400,10 @@ fn download_failure_message(stderr: &str, code: Option<i32>) -> String {
     if lower.contains("http error 429") || lower.contains("too many requests") {
         return "YouTube 暂时限制了当前网络的请求（HTTP 429），请稍后重试或更换代理节点。".into();
     }
-    if lower.contains("timed out") || lower.contains("connection reset") || lower.contains("unable to download") {
+    if lower.contains("timed out")
+        || lower.contains("connection reset")
+        || lower.contains("unable to download")
+    {
         return "下载过程中网络连接中断，已完成的部分文件会保留，请直接重试以断点续传。".into();
     }
     if lower.contains("requested format is not available") {
@@ -357,26 +415,40 @@ fn download_failure_message(stderr: &str, code: Option<i32>) -> String {
     if lower.contains("sign in") || lower.contains("age-restricted") {
         return "该视频需要登录或存在年龄限制，Streamnest 不会绕过此限制。".into();
     }
-    if let Some(message) = stderr.lines().rev().map(str::trim).find(|line| line.starts_with("ERROR:")) {
+    if let Some(message) = stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| line.starts_with("ERROR:"))
+    {
         return format!("下载失败：{}", message.trim_start_matches("ERROR:").trim());
     }
     format!(
         "下载进程退出，代码：{}",
-        code.map(|value| value.to_string()).unwrap_or_else(|| "未知".into())
+        code.map(|value| value.to_string())
+            .unwrap_or_else(|| "未知".into())
     )
 }
 
 fn ffmpeg_location() -> PathBuf {
     let extension = if cfg!(windows) { ".exe" } else { "" };
     if cfg!(debug_assertions) {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries").join(format!("ffmpeg-{}{extension}", env!("TARGET_TRIPLE")))
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join(format!("ffmpeg-{}{extension}", env!("TARGET_TRIPLE")))
     } else {
-        std::env::current_exe().ok().and_then(|path| path.parent().map(PathBuf::from)).unwrap_or_default().join(format!("ffmpeg{extension}"))
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(PathBuf::from))
+            .unwrap_or_default()
+            .join(format!("ffmpeg{extension}"))
     }
 }
 
 fn terminate_process_tree(child: &mut Option<CommandChild>) {
-    let Some(pid) = child.as_ref().map(CommandChild::pid) else { return; };
+    let Some(pid) = child.as_ref().map(CommandChild::pid) else {
+        return;
+    };
     #[cfg(target_os = "windows")]
     {
         // yt-dlp can own an FFmpeg child. `/T` ensures pause/cancel does not leave it running.
@@ -388,9 +460,13 @@ fn terminate_process_tree(child: &mut Option<CommandChild>) {
     #[cfg(target_os = "macos")]
     {
         // Kill direct descendants first; FFmpeg is spawned directly by yt-dlp.
-        let _ = std::process::Command::new("pkill").args(["-TERM", "-P", &pid.to_string()]).status();
+        let _ = std::process::Command::new("pkill")
+            .args(["-TERM", "-P", &pid.to_string()])
+            .status();
     }
-    if let Some(child) = child.take() { let _ = child.kill(); }
+    if let Some(child) = child.take() {
+        let _ = child.kill();
+    }
 }
 
 #[cfg(test)]
@@ -400,25 +476,50 @@ mod tests {
 
     fn task(preset: DownloadPreset) -> DownloadTask {
         DownloadTask {
-            id: "1".into(), video_id: "M7lc1UVf-VE".into(), title: "test".into(), channel: "test".into(),
-            thumbnail_url: String::new(), webpage_url: "https://www.youtube.com/watch?v=M7lc1UVf-VE".into(), preset,
-            output_directory: "/tmp/downloads".into(), output_path: None, status: TaskStatus::Queued,
-            progress: TaskProgress::default(), error: None, created_at: String::new(), updated_at: String::new(),
+            id: "1".into(),
+            video_id: "M7lc1UVf-VE".into(),
+            title: "test".into(),
+            channel: "test".into(),
+            thumbnail_url: String::new(),
+            webpage_url: "https://www.youtube.com/watch?v=M7lc1UVf-VE".into(),
+            preset,
+            output_directory: "/tmp/downloads".into(),
+            output_path: None,
+            status: TaskStatus::Queued,
+            progress: TaskProgress::default(),
+            error: None,
+            created_at: String::new(),
+            updated_at: String::new(),
         }
     }
 
     #[test]
     fn video_preset_limits_height_and_mp4() {
-        let args = download_arguments(&task(DownloadPreset::Video1080), &PathBuf::from("ffmpeg"), None);
+        let args = download_arguments(
+            &task(DownloadPreset::Video1080),
+            &PathBuf::from("ffmpeg"),
+            None,
+        );
         assert!(args.iter().any(|arg| arg.contains("height<=1080")));
-        assert!(args.windows(2).any(|pair| pair == ["--merge-output-format", "mp4"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--merge-output-format", "mp4"]));
     }
 
     #[test]
     fn frontend_cannot_supply_arbitrary_arguments() {
-        let args = download_arguments(&task(DownloadPreset::AudioMp3), &PathBuf::from("ffmpeg"), None);
-        assert!(args.windows(2).any(|pair| pair == ["--audio-format", "mp3"]));
-        assert_eq!(args.last().unwrap(), "https://www.youtube.com/watch?v=M7lc1UVf-VE");
+        let args = download_arguments(
+            &task(DownloadPreset::AudioMp3),
+            &PathBuf::from("ffmpeg"),
+            None,
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--audio-format", "mp3"]));
+        assert_eq!(
+            args.last().unwrap(),
+            "https://www.youtube.com/watch?v=M7lc1UVf-VE"
+        );
     }
 
     #[test]
@@ -428,22 +529,44 @@ mod tests {
             &PathBuf::from("ffmpeg"),
             Some("socks5://127.0.0.1:1080"),
         );
-        assert!(args.windows(2).any(|pair| pair == ["--proxy", "socks5://127.0.0.1:1080"]));
-        assert_eq!(args.last().unwrap(), "https://www.youtube.com/watch?v=M7lc1UVf-VE");
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--proxy", "socks5://127.0.0.1:1080"]));
+        assert_eq!(
+            args.last().unwrap(),
+            "https://www.youtube.com/watch?v=M7lc1UVf-VE"
+        );
     }
 
     #[test]
     fn retries_transient_download_failures_and_ignores_user_config() {
-        let args = download_arguments(&task(DownloadPreset::Video720), &PathBuf::from("ffmpeg"), None);
+        let args = download_arguments(
+            &task(DownloadPreset::Video720),
+            &PathBuf::from("ffmpeg"),
+            None,
+        );
         assert!(args.contains(&"--ignore-config".to_string()));
+        assert!(args.windows(2).any(|pair| pair == ["--encoding", "utf-8"]));
         assert!(args.windows(2).any(|pair| pair == ["--retries", "20"]));
-        assert!(args.windows(2).any(|pair| pair == ["--fragment-retries", "20"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--fragment-retries", "20"]));
     }
 
     #[test]
     fn reports_the_real_download_failure_instead_of_only_the_exit_code() {
-        assert!(download_failure_message("ERROR: unable to download video data: HTTP Error 403", Some(1)).contains("HTTP 403"));
-        assert!(download_failure_message("ERROR: Requested format is not available", Some(1)).contains("画质"));
-        assert!(download_failure_message("ERROR: unexpected extractor failure", Some(1)).contains("unexpected extractor failure"));
+        assert!(download_failure_message(
+            "ERROR: unable to download video data: HTTP Error 403",
+            Some(1)
+        )
+        .contains("HTTP 403"));
+        assert!(
+            download_failure_message("ERROR: Requested format is not available", Some(1))
+                .contains("画质")
+        );
+        assert!(
+            download_failure_message("ERROR: unexpected extractor failure", Some(1))
+                .contains("unexpected extractor failure")
+        );
     }
 }

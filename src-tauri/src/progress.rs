@@ -33,24 +33,40 @@ pub fn parse_output_line(line: &str) -> ParsedLine {
     if let Some(path) = clean.strip_prefix(FILE_PREFIX) {
         return ParsedLine::File(path.trim().to_string());
     }
-    if clean.starts_with("[Merger]") || clean.starts_with("[VideoConvertor]") || clean.starts_with("[ExtractAudio]") || clean.starts_with("[Fixup") {
+    if clean.starts_with("[Merger]")
+        || clean.starts_with("[VideoConvertor]")
+        || clean.starts_with("[ExtractAudio]")
+        || clean.starts_with("[Fixup")
+    {
         return ParsedLine::Processing("正在合并与转换".into());
     }
     ParsedLine::Ignore
 }
 
 fn parse_percent(value: &str) -> f64 {
-    PERCENT_RE.replace_all(value, "").parse::<f64>().unwrap_or(0.0).clamp(0.0, 100.0)
+    PERCENT_RE
+        .replace_all(value, "")
+        .parse::<f64>()
+        .unwrap_or(0.0)
+        .clamp(0.0, 100.0)
 }
 
 fn parse_u64(value: &str) -> Option<u64> {
     let value = value.trim();
-    if value.is_empty() || value == "NA" || value == "None" { None } else { value.parse().ok() }
+    if value.is_empty() || value == "NA" || value == "None" {
+        None
+    } else {
+        value.parse().ok()
+    }
 }
 
 fn parse_f64(value: &str) -> Option<f64> {
     let value = value.trim();
-    if value.is_empty() || value == "NA" || value == "None" { None } else { value.parse().ok() }
+    if value.is_empty() || value == "NA" || value == "None" {
+        None
+    } else {
+        value.parse().ok()
+    }
 }
 
 #[cfg(test)]
@@ -77,4 +93,3 @@ mod tests {
         }
     }
 }
-

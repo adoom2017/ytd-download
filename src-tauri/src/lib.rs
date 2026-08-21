@@ -1,15 +1,20 @@
 mod db;
 mod downloader;
 mod models;
+mod output;
 mod progress;
 
-use std::{fs, path::{Path, PathBuf}, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use chrono::Utc;
 use downloader::{ControlAction, Scheduler};
 use models::{
-    AppSettings, DownloadRequest, DownloadTask, SettingsPatch, TaskProgress, TaskStatus, VideoDetails,
-    VideoSummary, YtSearchEnvelope, YtVideo,
+    AppSettings, DownloadRequest, DownloadTask, SettingsPatch, TaskProgress, TaskStatus,
+    VideoDetails, VideoSummary, YtSearchEnvelope, YtVideo,
 };
 use regex::Regex;
 use serde::Serialize;
@@ -33,7 +38,9 @@ pub enum AppError {
 
 impl Serialize for AppError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where S: serde::Serializer {
+    where
+        S: serde::Serializer,
+    {
         serializer.serialize_str(&self.to_string())
     }
 }
@@ -41,10 +48,16 @@ impl Serialize for AppError {
 pub type AppResult<T> = Result<T, AppError>;
 
 #[tauri::command]
-async fn search_videos(app: tauri::AppHandle, state: State<'_, Scheduler>, query: String) -> AppResult<Vec<VideoSummary>> {
+async fn search_videos(
+    app: tauri::AppHandle,
+    state: State<'_, Scheduler>,
+    query: String,
+) -> AppResult<Vec<VideoSummary>> {
     let query = query.trim();
     if query.is_empty() || query.chars().count() > 200 {
-        return Err(AppError::Validation("请输入 1–200 个字符的搜索关键词".into()));
+        return Err(AppError::Validation(
+            "请输入 1–200 个字符的搜索关键词".into(),
+        ));
     }
     let mut args = vec![
         "--flat-playlist".to_string(),
@@ -54,10 +67,13 @@ async fn search_videos(app: tauri::AppHandle, state: State<'_, Scheduler>, query
     ];
     append_proxy_args(&mut args, configured_proxy(state.database())?);
     args.push(format!("ytsearch30:{query}"));
-    let output = app.shell().sidecar("yt-dlp")
+    let output = app
+        .shell()
+        .sidecar("yt-dlp")
         .map_err(|error| AppError::Runtime(format!("无法加载 yt-dlp：{error}")))?
         .args(args)
-        .output().await
+        .output()
+        .await
         .map_err(|error| AppError::Runtime(format!("搜索进程启动失败：{error}")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -66,11 +82,20 @@ async fn search_videos(app: tauri::AppHandle, state: State<'_, Scheduler>, query
         return Err(AppError::Runtime(user_facing_tool_error(&stderr)));
     }
     let envelope: YtSearchEnvelope = serde_json::from_str(stdout.trim())?;
-    Ok(envelope.entries.into_iter().filter_map(YtVideo::into_summary).take(30).collect())
+    Ok(envelope
+        .entries
+        .into_iter()
+        .filter_map(YtVideo::into_summary)
+        .take(30)
+        .collect())
 }
 
 #[tauri::command]
-async fn get_video_details(app: tauri::AppHandle, state: State<'_, Scheduler>, video_id: String) -> AppResult<VideoDetails> {
+async fn get_video_details(
+    app: tauri::AppHandle,
+    state: State<'_, Scheduler>,
+    video_id: String,
+) -> AppResult<VideoDetails> {
     validate_video_id(&video_id)?;
     let url = format!("https://www.youtube.com/watch?v={video_id}");
     let mut args = vec![
@@ -81,19 +106,33 @@ async fn get_video_details(app: tauri::AppHandle, state: State<'_, Scheduler>, v
     ];
     append_proxy_args(&mut args, configured_proxy(state.database())?);
     args.push(url);
-    let output = app.shell().sidecar("yt-dlp")
+    let output = app
+        .shell()
+        .sidecar("yt-dlp")
         .map_err(|error| AppError::Runtime(format!("无法加载 yt-dlp：{error}")))?
         .args(args)
-        .output().await
+        .output()
+        .await
         .map_err(|error| AppError::Runtime(format!("视频详情加载失败：{error}")))?;
-    let raw: YtVideo = serde_json::from_slice(&output.stdout)
-        .map_err(|_| AppError::Runtime(user_facing_tool_error(&String::from_utf8_lossy(&output.stderr))))?;
+    let raw: YtVideo = serde_json::from_slice(&output.stdout).map_err(|_| {
+        AppError::Runtime(user_facing_tool_error(&String::from_utf8_lossy(
+            &output.stderr,
+        )))
+    })?;
     let description = raw.description.clone().unwrap_or_default();
     let upload_date = raw.upload_date.clone();
     let view_count = raw.view_count;
     let is_embeddable = raw.playable_in_embed;
-    let summary = raw.into_summary().ok_or_else(|| AppError::Runtime("无法识别该视频".into()))?;
-    Ok(VideoDetails { summary, description, upload_date, view_count, is_embeddable })
+    let summary = raw
+        .into_summary()
+        .ok_or_else(|| AppError::Runtime("无法识别该视频".into()))?;
+    Ok(VideoDetails {
+        summary,
+        description,
+        upload_date,
+        view_count,
+        is_embeddable,
+    })
 }
 
 #[tauri::command]
@@ -113,10 +152,19 @@ async fn enqueue_downloads(
     let mut created = Vec::with_capacity(requests.len());
     for request in requests {
         validate_video_id(&request.video.id)?;
-        if matches!(request.video.live_status.as_deref(), Some("is_live" | "is_upcoming")) {
-            return Err(AppError::Validation(format!("“{}”是直播或预约内容，首版暂不支持下载", request.video.title)));
+        if matches!(
+            request.video.live_status.as_deref(),
+            Some("is_live" | "is_upcoming")
+        ) {
+            return Err(AppError::Validation(format!(
+                "“{}”是直播或预约内容，首版暂不支持下载",
+                request.video.title
+            )));
         }
-        let directory = request.output_directory.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&default_output));
+        let directory = request
+            .output_directory
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&default_output));
         if !directory.is_absolute() {
             return Err(AppError::Validation("下载目录必须是绝对路径".into()));
         }
@@ -151,24 +199,40 @@ fn list_tasks(state: State<'_, Scheduler>) -> AppResult<Vec<DownloadTask>> {
 }
 
 #[tauri::command]
-async fn pause_task(app: tauri::AppHandle, state: State<'_, Scheduler>, task_id: String) -> AppResult<()> {
+async fn pause_task(
+    app: tauri::AppHandle,
+    state: State<'_, Scheduler>,
+    task_id: String,
+) -> AppResult<()> {
     state.control(&app, &task_id, ControlAction::Pause).await
 }
 
 #[tauri::command]
-async fn cancel_task(app: tauri::AppHandle, state: State<'_, Scheduler>, task_id: String) -> AppResult<()> {
+async fn cancel_task(
+    app: tauri::AppHandle,
+    state: State<'_, Scheduler>,
+    task_id: String,
+) -> AppResult<()> {
     state.control(&app, &task_id, ControlAction::Cancel).await
 }
 
 #[tauri::command]
-fn resume_task(app: tauri::AppHandle, state: State<'_, Scheduler>, task_id: String) -> AppResult<()> {
+fn resume_task(
+    app: tauri::AppHandle,
+    state: State<'_, Scheduler>,
+    task_id: String,
+) -> AppResult<()> {
     state.requeue(&app, &task_id, &[TaskStatus::Paused])?;
     state.kick(app);
     Ok(())
 }
 
 #[tauri::command]
-fn retry_task(app: tauri::AppHandle, state: State<'_, Scheduler>, task_id: String) -> AppResult<()> {
+fn retry_task(
+    app: tauri::AppHandle,
+    state: State<'_, Scheduler>,
+    task_id: String,
+) -> AppResult<()> {
     state.requeue(&app, &task_id, &[TaskStatus::Failed, TaskStatus::Canceled])?;
     state.kick(app);
     Ok(())
@@ -181,8 +245,13 @@ fn clear_completed_tasks(state: State<'_, Scheduler>) -> AppResult<()> {
 
 #[tauri::command]
 async fn choose_download_directory(state: State<'_, Scheduler>) -> AppResult<Option<String>> {
-    let picked = tauri::async_runtime::spawn_blocking(|| rfd::FileDialog::new().set_title("选择下载文件夹").pick_folder())
-        .await.map_err(|error| AppError::Runtime(format!("文件夹选择器失败：{error}")))?;
+    let picked = tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("选择下载文件夹")
+            .pick_folder()
+    })
+    .await
+    .map_err(|error| AppError::Runtime(format!("文件夹选择器失败：{error}")))?;
     if let Some(path) = picked {
         let value = path.to_string_lossy().to_string();
         state.database().set_setting("output_directory", &value)?;
@@ -196,7 +265,9 @@ async fn choose_download_directory(state: State<'_, Scheduler>) -> AppResult<Opt
 fn open_output_path(state: State<'_, Scheduler>, task_id: String, reveal: bool) -> AppResult<()> {
     let task = state.database().task(&task_id)?;
     let output = task.output_path.as_ref().map(PathBuf::from);
-    let target = output.clone().unwrap_or_else(|| PathBuf::from(&task.output_directory));
+    let target = output
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(&task.output_directory));
     if !target.exists() {
         return Err(AppError::Validation("下载文件或目录不存在".into()));
     }
@@ -204,17 +275,28 @@ fn open_output_path(state: State<'_, Scheduler>, task_id: String, reveal: bool) 
 }
 
 #[tauri::command]
-async fn get_settings(app: tauri::AppHandle, state: State<'_, Scheduler>) -> AppResult<AppSettings> {
+async fn get_settings(
+    app: tauri::AppHandle,
+    state: State<'_, Scheduler>,
+) -> AppResult<AppSettings> {
     load_settings(&app, state.database()).await
 }
 
 #[tauri::command]
-async fn update_settings(app: tauri::AppHandle, state: State<'_, Scheduler>, patch: SettingsPatch) -> AppResult<AppSettings> {
+async fn update_settings(
+    app: tauri::AppHandle,
+    state: State<'_, Scheduler>,
+    patch: SettingsPatch,
+) -> AppResult<AppSettings> {
     if let Some(directory) = patch.output_directory {
         let path = PathBuf::from(&directory);
-        if !path.is_absolute() { return Err(AppError::Validation("下载目录必须是绝对路径".into())); }
+        if !path.is_absolute() {
+            return Err(AppError::Validation("下载目录必须是绝对路径".into()));
+        }
         fs::create_dir_all(&path)?;
-        state.database().set_setting("output_directory", &directory)?;
+        state
+            .database()
+            .set_setting("output_directory", &directory)?;
     }
     if let Some(proxy_url) = patch.proxy_url {
         let normalized = normalize_proxy_url(&proxy_url)?;
@@ -227,7 +309,9 @@ async fn update_settings(app: tauri::AppHandle, state: State<'_, Scheduler>, pat
         state.database().set_setting("theme", &theme)?;
     }
     if let Some(acknowledged) = patch.rights_acknowledged {
-        state.database().set_setting("rights_acknowledged", if acknowledged { "1" } else { "0" })?;
+        state
+            .database()
+            .set_setting("rights_acknowledged", if acknowledged { "1" } else { "0" })?;
     }
     load_settings(&app, state.database()).await
 }
@@ -236,7 +320,9 @@ async fn load_settings(app: &tauri::AppHandle, database: &db::Database) -> AppRe
     Ok(AppSettings {
         output_directory: output_directory(database)?,
         proxy_url: configured_proxy(database)?.unwrap_or_default(),
-        theme: database.setting("theme")?.unwrap_or_else(|| "system".into()),
+        theme: database
+            .setting("theme")?
+            .unwrap_or_else(|| "system".into()),
         rights_acknowledged: database.setting("rights_acknowledged")?.as_deref() == Some("1"),
         yt_dlp_version: tool_version(app, "yt-dlp", &["--version"]).await,
         ffmpeg_version: tool_version(app, "ffmpeg", &["-version"]).await,
@@ -244,14 +330,27 @@ async fn load_settings(app: &tauri::AppHandle, database: &db::Database) -> AppRe
 }
 
 async fn tool_version(app: &tauri::AppHandle, name: &str, args: &[&str]) -> String {
-    let Ok(command) = app.shell().sidecar(name) else { return "未安装".into(); };
-    let Ok(output) = command.args(args).output().await else { return "不可用".into(); };
-    String::from_utf8_lossy(&output.stdout).lines().next().unwrap_or("未知版本").trim().to_string()
+    let Ok(command) = app.shell().sidecar(name) else {
+        return "未安装".into();
+    };
+    let Ok(output) = command.args(args).output().await else {
+        return "不可用".into();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or("未知版本")
+        .trim()
+        .to_string()
 }
 
 fn output_directory(database: &db::Database) -> AppResult<String> {
-    if let Some(directory) = database.setting("output_directory")? { return Ok(directory); }
-    let directory = dirs::download_dir().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))).join("YouTube Downloads");
+    if let Some(directory) = database.setting("output_directory")? {
+        return Ok(directory);
+    }
+    let directory = dirs::download_dir()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .join("YouTube Downloads");
     fs::create_dir_all(&directory)?;
     let value = directory.to_string_lossy().to_string();
     database.set_setting("output_directory", &value)?;
@@ -259,7 +358,9 @@ fn output_directory(database: &db::Database) -> AppResult<String> {
 }
 
 fn configured_proxy(database: &db::Database) -> AppResult<Option<String>> {
-    Ok(database.setting("proxy_url")?.filter(|value| !value.trim().is_empty()))
+    Ok(database
+        .setting("proxy_url")?
+        .filter(|value| !value.trim().is_empty()))
 }
 
 fn append_proxy_args(args: &mut Vec<String>, proxy_url: Option<String>) {
@@ -276,69 +377,123 @@ fn normalize_proxy_url(value: &str) -> AppResult<String> {
     if value.len() > 2048 {
         return Err(AppError::Validation("代理地址过长".into()));
     }
-    let parsed = url::Url::parse(value)
-        .map_err(|_| AppError::Validation("代理地址格式无效，例如：http://127.0.0.1:7890".into()))?;
-    if !matches!(parsed.scheme(), "http" | "https" | "socks4" | "socks5" | "socks5h") {
-        return Err(AppError::Validation("代理仅支持 HTTP、HTTPS、SOCKS4、SOCKS5 或 SOCKS5H".into()));
+    let parsed = url::Url::parse(value).map_err(|_| {
+        AppError::Validation("代理地址格式无效，例如：http://127.0.0.1:7890".into())
+    })?;
+    if !matches!(
+        parsed.scheme(),
+        "http" | "https" | "socks4" | "socks5" | "socks5h"
+    ) {
+        return Err(AppError::Validation(
+            "代理仅支持 HTTP、HTTPS、SOCKS4、SOCKS5 或 SOCKS5H".into(),
+        ));
     }
     if parsed.host_str().is_none() {
         return Err(AppError::Validation("代理地址缺少主机名或 IP 地址".into()));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(AppError::Validation("暂不支持在代理地址中保存账号或密码".into()));
+        return Err(AppError::Validation(
+            "暂不支持在代理地址中保存账号或密码".into(),
+        ));
     }
-    if parsed.query().is_some() || parsed.fragment().is_some() || !matches!(parsed.path(), "" | "/") {
-        return Err(AppError::Validation("代理地址不能包含路径、查询参数或片段".into()));
+    if parsed.query().is_some() || parsed.fragment().is_some() || !matches!(parsed.path(), "" | "/")
+    {
+        return Err(AppError::Validation(
+            "代理地址不能包含路径、查询参数或片段".into(),
+        ));
     }
     Ok(value.to_string())
 }
 
 fn validate_video_id(video_id: &str) -> AppResult<()> {
     let pattern = Regex::new(r"^[A-Za-z0-9_-]{11}$").expect("valid video id regex");
-    if pattern.is_match(video_id) { Ok(()) } else { Err(AppError::Validation("无效的 YouTube 视频 ID".into())) }
+    if pattern.is_match(video_id) {
+        Ok(())
+    } else {
+        Err(AppError::Validation("无效的 YouTube 视频 ID".into()))
+    }
 }
 
 fn user_facing_tool_error(stderr: &str) -> String {
     let lower = stderr.to_ascii_lowercase();
-    if lower.contains("network") || lower.contains("timed out") || lower.contains("unable to download") {
+    if lower.contains("network")
+        || lower.contains("timed out")
+        || lower.contains("unable to download")
+    {
         "无法连接 YouTube，请检查网络后重试".into()
     } else if lower.contains("sign in") || lower.contains("age-restricted") {
         "该视频需要登录或存在年龄限制，Streamnest 不会绕过此限制".into()
     } else if lower.contains("private video") || lower.contains("video unavailable") {
         "该视频不可用、已设为私有或受地区限制".into()
     } else {
-        stderr.lines().find(|line| line.contains("ERROR:")).unwrap_or("yt-dlp 未返回可用结果").trim().to_string()
+        stderr
+            .lines()
+            .find(|line| line.contains("ERROR:"))
+            .unwrap_or("yt-dlp 未返回可用结果")
+            .trim()
+            .to_string()
     }
 }
 
 fn open_path(path: &Path, reveal: bool) -> AppResult<()> {
     #[cfg(target_os = "windows")]
     let status = if reveal {
-        Command::new("explorer.exe").arg(format!("/select,{}", path.display())).status()?
+        Command::new("explorer.exe")
+            .arg(format!("/select,{}", path.display()))
+            .status()?
     } else {
-        open::that(path).map_err(|error| AppError::Runtime(format!("系统无法打开该文件：{error}")))?;
+        open::that(path)
+            .map_err(|error| AppError::Runtime(format!("系统无法打开该文件：{error}")))?;
         return Ok(());
     };
     #[cfg(target_os = "macos")]
-    let status = if reveal { Command::new("open").arg("-R").arg(path).status()? } else { Command::new("open").arg(path).status()? };
+    let status = if reveal {
+        Command::new("open").arg("-R").arg(path).status()?
+    } else {
+        Command::new("open").arg(path).status()?
+    };
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    let status = Command::new("xdg-open").arg(if path.is_dir() { path } else { path.parent().unwrap_or(path) }).status()?;
-    if status.success() { Ok(()) } else { Err(AppError::Runtime("系统无法打开该路径".into())) }
+    let status = Command::new("xdg-open")
+        .arg(if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        })
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Runtime("系统无法打开该路径".into()))
+    }
 }
 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            let data_dir = app.path().app_data_dir().map_err(|error| Box::<dyn std::error::Error>::from(error))?;
-            let database = db::Database::open(&data_dir).map_err(Box::<dyn std::error::Error>::from)?;
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| Box::<dyn std::error::Error>::from(error))?;
+            let database =
+                db::Database::open(&data_dir).map_err(Box::<dyn std::error::Error>::from)?;
             app.manage(Scheduler::new(database));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            search_videos, get_video_details, enqueue_downloads, list_tasks, pause_task, resume_task,
-            cancel_task, retry_task, clear_completed_tasks, choose_download_directory, open_output_path,
-            get_settings, update_settings,
+            search_videos,
+            get_video_details,
+            enqueue_downloads,
+            list_tasks,
+            pause_task,
+            resume_task,
+            cancel_task,
+            retry_task,
+            clear_completed_tasks,
+            choose_download_directory,
+            open_output_path,
+            get_settings,
+            update_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Streamnest");

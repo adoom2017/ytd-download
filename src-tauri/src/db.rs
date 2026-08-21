@@ -1,9 +1,16 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
-use crate::{AppError, AppResult, models::{DownloadTask, TaskStatus}};
+use crate::{
+    models::{DownloadTask, TaskStatus},
+    output::resolve_output_path,
+    AppError, AppResult,
+};
 
 #[derive(Debug, Clone)]
 pub struct Database {
@@ -13,9 +20,12 @@ pub struct Database {
 impl Database {
     pub fn open(app_data_dir: &Path) -> AppResult<Self> {
         fs::create_dir_all(app_data_dir)?;
-        let database = Self { path: app_data_dir.join("streamnest.sqlite3") };
+        let database = Self {
+            path: app_data_dir.join("streamnest.sqlite3"),
+        };
         database.migrate()?;
         database.recover_interrupted()?;
+        database.repair_completed_output_paths()?;
         Ok(database)
     }
 
@@ -54,12 +64,33 @@ impl Database {
     fn recover_interrupted(&self) -> AppResult<()> {
         let mut tasks = self.list_tasks()?;
         for task in &mut tasks {
-            if matches!(task.status, TaskStatus::Resolving | TaskStatus::Downloading | TaskStatus::Processing) {
+            if matches!(
+                task.status,
+                TaskStatus::Resolving | TaskStatus::Downloading | TaskStatus::Processing
+            ) {
                 task.status = TaskStatus::Paused;
                 task.progress.stage = "上次运行被中断，可继续下载".into();
                 task.error = None;
                 task.updated_at = Utc::now().to_rfc3339();
                 self.save_task(task)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn repair_completed_output_paths(&self) -> AppResult<()> {
+        for mut task in self.list_tasks()? {
+            if task.status != TaskStatus::Completed {
+                continue;
+            }
+            let Some(path) = resolve_output_path(&task) else {
+                continue;
+            };
+            let repaired = path.to_string_lossy().to_string();
+            if task.output_path.as_deref() != Some(repaired.as_str()) {
+                task.output_path = Some(repaired);
+                task.updated_at = Utc::now().to_rfc3339();
+                self.save_task(&task)?;
             }
         }
         Ok(())
@@ -84,17 +115,22 @@ impl Database {
     }
 
     pub fn task(&self, id: &str) -> AppResult<DownloadTask> {
-        let payload: Option<String> = self.connect()?.query_row(
-            "SELECT payload FROM tasks WHERE id=?1",
-            [id],
-            |row| row.get(0),
-        ).optional()?;
-        payload.map(|json| serde_json::from_str(&json)).transpose()?.ok_or_else(|| AppError::Validation("任务不存在".into()))
+        let payload: Option<String> = self
+            .connect()?
+            .query_row("SELECT payload FROM tasks WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        payload
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?
+            .ok_or_else(|| AppError::Validation("任务不存在".into()))
     }
 
     pub fn list_tasks(&self) -> AppResult<Vec<DownloadTask>> {
         let connection = self.connect()?;
-        let mut statement = connection.prepare("SELECT payload FROM tasks ORDER BY created_at DESC")?;
+        let mut statement =
+            connection.prepare("SELECT payload FROM tasks ORDER BY created_at DESC")?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         let mut tasks = Vec::new();
         for row in rows {
@@ -107,12 +143,17 @@ impl Database {
     pub fn claim_next_queued(&self) -> AppResult<Option<DownloadTask>> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let payload: Option<String> = transaction.query_row(
-            "SELECT payload FROM tasks WHERE status='queued' ORDER BY created_at ASC LIMIT 1",
-            [],
-            |row| row.get(0),
-        ).optional()?;
-        let Some(payload) = payload else { transaction.commit()?; return Ok(None); };
+        let payload: Option<String> = transaction
+            .query_row(
+                "SELECT payload FROM tasks WHERE status='queued' ORDER BY created_at ASC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(payload) = payload else {
+            transaction.commit()?;
+            return Ok(None);
+        };
         let mut task: DownloadTask = serde_json::from_str(&payload)?;
         task.status = TaskStatus::Resolving;
         task.progress.stage = "正在解析视频信息".into();
@@ -127,12 +168,18 @@ impl Database {
     }
 
     pub fn delete_completed(&self) -> AppResult<()> {
-        self.connect()?.execute("DELETE FROM tasks WHERE status='completed'", [])?;
+        self.connect()?
+            .execute("DELETE FROM tasks WHERE status='completed'", [])?;
         Ok(())
     }
 
     pub fn setting(&self, key: &str) -> AppResult<Option<String>> {
-        Ok(self.connect()?.query_row("SELECT value FROM settings WHERE key=?1", [key], |row| row.get(0)).optional()?)
+        Ok(self
+            .connect()?
+            .query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?)
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> AppResult<()> {
@@ -152,10 +199,20 @@ mod tests {
     fn sample_task(status: TaskStatus) -> DownloadTask {
         let now = Utc::now().to_rfc3339();
         DownloadTask {
-            id: "task-1".into(), video_id: "M7lc1UVf-VE".into(), title: "示例".into(), channel: "频道".into(),
-            thumbnail_url: "https://example.test/thumb.jpg".into(), webpage_url: "https://www.youtube.com/watch?v=M7lc1UVf-VE".into(),
-            preset: DownloadPreset::Video720, output_directory: "downloads".into(), output_path: None, status,
-            progress: TaskProgress::default(), error: None, created_at: now.clone(), updated_at: now,
+            id: "task-1".into(),
+            video_id: "M7lc1UVf-VE".into(),
+            title: "示例".into(),
+            channel: "频道".into(),
+            thumbnail_url: "https://example.test/thumb.jpg".into(),
+            webpage_url: "https://www.youtube.com/watch?v=M7lc1UVf-VE".into(),
+            preset: DownloadPreset::Video720,
+            output_directory: "downloads".into(),
+            output_path: None,
+            status,
+            progress: TaskProgress::default(),
+            error: None,
+            created_at: now.clone(),
+            updated_at: now,
         }
     }
 
@@ -173,8 +230,30 @@ mod tests {
     fn recovers_active_tasks_as_paused() {
         let temp = tempfile::tempdir().unwrap();
         let db = Database::open(temp.path()).unwrap();
-        db.insert_task(&sample_task(TaskStatus::Downloading)).unwrap();
+        db.insert_task(&sample_task(TaskStatus::Downloading))
+            .unwrap();
         db.recover_interrupted().unwrap();
         assert_eq!(db.task("task-1").unwrap().status, TaskStatus::Paused);
+    }
+
+    #[test]
+    fn repairs_a_completed_task_with_a_misdecoded_output_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("downloads");
+        fs::create_dir_all(&output).unwrap();
+        let final_file = output.join("中文标题 [M7lc1UVf-VE].mp4");
+        fs::write(&final_file, b"complete").unwrap();
+
+        let db = Database::open(&temp.path().join("data")).unwrap();
+        let mut task = sample_task(TaskStatus::Completed);
+        task.output_directory = output.to_string_lossy().to_string();
+        task.output_path = Some(output.join("乱码.mp4").to_string_lossy().to_string());
+        db.insert_task(&task).unwrap();
+        db.repair_completed_output_paths().unwrap();
+
+        assert_eq!(
+            db.task("task-1").unwrap().output_path,
+            Some(final_file.to_string_lossy().to_string())
+        );
     }
 }
