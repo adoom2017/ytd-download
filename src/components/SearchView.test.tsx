@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useAppStore } from "../store";
 import { PresetSelect, SearchView } from "./SearchView";
 
 const settings = {
@@ -12,6 +13,8 @@ const settings = {
 };
 
 describe("SearchView", () => {
+  beforeEach(() => useAppStore.getState().resetSearchSession());
+
   it("loads browser-preview search results on explicit submit", async () => {
     render(<SearchView settings={settings} onQueued={vi.fn()} onNeedRights={vi.fn()} onError={vi.fn()} />);
     fireEvent.change(screen.getByLabelText("输入视频关键词"), { target: { value: "开源动画" } });
@@ -27,6 +30,23 @@ describe("SearchView", () => {
     render(<SearchView settings={settings} onQueued={vi.fn()} onNeedRights={vi.fn()} onError={vi.fn()} />);
     expect(screen.getByText("搜索你想保存的视频")).toBeInTheDocument();
     expect(screen.getByText("下载前预览")).toBeInTheDocument();
+  });
+
+  it("keeps the search session after the view unmounts and mounts again", async () => {
+    const props = { settings, onQueued: vi.fn(), onNeedRights: vi.fn(), onError: vi.fn() };
+    const firstView = render(<SearchView {...props} />);
+
+    fireEvent.change(screen.getByLabelText("输入视频关键词"), { target: { value: "开源动画" } });
+    fireEvent.click(screen.getByRole("button", { name: "开始搜索" }));
+    await waitFor(() => expect(screen.getByText("2 个结果")).toBeInTheDocument());
+    fireEvent.click(screen.getByLabelText(/选择 开源动画 · 桌面预览示例/));
+
+    firstView.unmount();
+    render(<SearchView {...props} />);
+
+    expect(screen.getByLabelText("输入视频关键词")).toHaveValue("开源动画");
+    expect(screen.getByText("2 个结果")).toBeInTheDocument();
+    expect(screen.getByLabelText(/选择 开源动画 · 桌面预览示例/)).toBeChecked();
   });
 
   it("switches to a dedicated music download mode", () => {

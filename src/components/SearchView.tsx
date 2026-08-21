@@ -3,6 +3,7 @@ import { Check, Clapperboard, Download, ExternalLink, LoaderCircle, Music2, Play
 import { copy } from "../i18n";
 import { enqueueDownloads, getVideoDetails, searchVideos } from "../lib/api";
 import { formatDuration, presetLabels } from "../lib/format";
+import { useAppStore } from "../store";
 import type { AppSettings, DownloadPreset, VideoDetails, VideoSummary } from "../types";
 
 interface SearchViewProps {
@@ -13,17 +14,16 @@ interface SearchViewProps {
 }
 
 export function SearchView({ settings, onQueued, onNeedRights, onError }: SearchViewProps) {
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<VideoSummary[]>([]);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const { searchSession, updateSearchSession } = useAppStore();
+  const { query, results, selected, loading, error, hasSearched, preset } = searchSession;
   const [preview, setPreview] = useState<VideoDetails | VideoSummary | null>(null);
-  const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [hasSearched, setHasSearched] = useState(false);
-  const [preset, setPreset] = useState<DownloadPreset>("video1080");
   const previewCloseRef = useRef<HTMLButtonElement>(null);
   const musicMode = preset === "audioM4a" || preset === "audioMp3";
+
+  const setQuery = (value: string) => updateSearchSession({ query: value });
+  const setPreset = (value: DownloadPreset) => updateSearchSession({ preset: value });
+  const setSelected = (value: Set<string>) => updateSearchSession({ selected: value });
 
   function chooseMediaMode(mode: "video" | "music") {
     setPreset(mode === "music" ? "audioMp3" : "video1080");
@@ -33,29 +33,29 @@ export function SearchView({ settings, onQueued, onNeedRights, onError }: Search
     event.preventDefault();
     const value = query.trim();
     if (!value || loading) return;
-    setLoading(true);
-    setError(null);
-    setHasSearched(true);
+    updateSearchSession({ loading: true, error: null, hasSearched: true });
     setPreview(null);
     setSelected(new Set());
     try {
       // Let React commit and WebView paint the busy state before starting the
       // comparatively expensive desktop IPC/sidecar request.
       await waitForLoadingPaint();
-      setResults(await searchVideos(value));
+      updateSearchSession({ results: await searchVideos(value) });
     } catch (reason) {
-      setResults([]);
-      setError(reason instanceof Error ? reason.message : String(reason));
+      updateSearchSession({
+        results: [],
+        error: reason instanceof Error ? reason.message : String(reason),
+      });
     } finally {
-      setLoading(false);
+      updateSearchSession({ loading: false });
     }
   }
 
   function toggle(videoId: string) {
-    setSelected((current) => {
-      const next = new Set(current);
+    updateSearchSession((current) => {
+      const next = new Set(current.selected);
       next.has(videoId) ? next.delete(videoId) : next.add(videoId);
-      return next;
+      return { selected: next };
     });
   }
 
@@ -266,8 +266,8 @@ function VideoCard({ video, selected, musicMode, onToggle, onPreview, onDownload
 }) {
   return (
     <article className={`video-card ${selected ? "is-selected" : ""}`}>
-      <label className="card-checkbox" aria-label={`选择 ${video.title}`}>
-        <input type="checkbox" checked={selected} onChange={onToggle} />
+      <label className="card-checkbox">
+        <input type="checkbox" checked={selected} onChange={onToggle} aria-label={`选择 ${video.title}`} />
         <span><Check size={14} /></span>
       </label>
       <button type="button" className="thumbnail-button" onClick={onPreview} aria-label={`预览 ${video.title}`}>
