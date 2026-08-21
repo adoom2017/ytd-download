@@ -1,18 +1,18 @@
 {
   "ytDlp": {
-    "version": "2026.03.13",
+    "version": "2026.08.19",
     "targets": {
       "x86_64-pc-windows-msvc": {
-        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.03.13/yt-dlp.exe",
-        "sha256": "76f574f1879a0b32f0829cdcc3aaee9654d927227f8deced7557f5486dd4e1ce"
+        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe",
+        "sha256": "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
       },
       "x86_64-apple-darwin": {
-        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.03.13/yt-dlp_macos",
-        "sha256": "d27dbb7fd7d8d6af195c8fbf4dce8e3d25e5b474bf088589962468d823e2ee9f"
+        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_macos",
+        "sha256": "0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
       },
       "aarch64-apple-darwin": {
-        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.03.13/yt-dlp_macos",
-        "sha256": "d27dbb7fd7d8d6af195c8fbf4dce8e3d25e5b474bf088589962468d823e2ee9f"
+        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_macos",
+        "sha256": "0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
       }
     }
   },
@@ -21,4 +21,3 @@
     "verification": "The package archive and platform binary checksum are verified by pnpm and ffmpeg-static's install script."
   }
 }
-

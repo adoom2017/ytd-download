@@ -104,6 +104,7 @@ impl Scheduler {
             }
         };
         let mut child = Some(child);
+        let mut stderr = String::new();
 
         task.status = TaskStatus::Downloading;
         task.progress.stage = "正在下载".into();
@@ -141,7 +142,7 @@ impl Scheduler {
                         break;
                     };
                     match event {
-                        CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
+                        CommandEvent::Stdout(bytes) => {
                             let text = String::from_utf8_lossy(&bytes);
                             for line in text.lines() {
                                 match parse_output_line(line) {
@@ -165,6 +166,19 @@ impl Scheduler {
                                 }
                             }
                         }
+                        CommandEvent::Stderr(bytes) => {
+                            let text = String::from_utf8_lossy(&bytes);
+                            append_diagnostic(&mut stderr, &text);
+                            for line in text.lines() {
+                                if let ParsedLine::Processing(stage) = parse_output_line(line) {
+                                    task.status = TaskStatus::Processing;
+                                    task.progress.percent = 100.0;
+                                    task.progress.stage = stage;
+                                    task.updated_at = Utc::now().to_rfc3339();
+                                    let _ = self.persist_emit(&app, &task);
+                                }
+                            }
+                        }
                         CommandEvent::Terminated(payload) => {
                             if payload.code == Some(0) {
                                 task.status = TaskStatus::Completed;
@@ -174,7 +188,7 @@ impl Scheduler {
                                 task.updated_at = Utc::now().to_rfc3339();
                                 let _ = self.persist_emit(&app, &task);
                             } else {
-                                self.fail(&app, &mut task, format!("下载进程退出，代码：{}", payload.code.map(|code| code.to_string()).unwrap_or_else(|| "未知".into())));
+                                self.fail(&app, &mut task, download_failure_message(&stderr, payload.code));
                             }
                             finished = true;
                         }
@@ -251,10 +265,24 @@ pub fn emit_task(app: &AppHandle, task: &DownloadTask) {
 
 pub fn download_arguments(task: &DownloadTask, ffmpeg: &PathBuf, proxy_url: Option<&str>) -> Vec<String> {
     let mut args = vec![
+        "--ignore-config".into(),
+        "--no-update".into(),
         "--newline".into(),
         "--continue".into(),
         "--no-overwrites".into(),
         "--no-playlist".into(),
+        "--socket-timeout".into(),
+        "30".into(),
+        "--retries".into(),
+        "20".into(),
+        "--fragment-retries".into(),
+        "20".into(),
+        "--extractor-retries".into(),
+        "5".into(),
+        "--retry-sleep".into(),
+        "http:exp=1:20".into(),
+        "--retry-sleep".into(),
+        "fragment:exp=1:20".into(),
         "--progress-template".into(),
         "__STREAMNEST_PROGRESS__%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s".into(),
         "--print".into(),
@@ -295,6 +323,47 @@ fn add_video_preset(args: &mut Vec<String>, height: u16) {
         "--merge-output-format".into(),
         "mp4".into(),
     ]);
+}
+
+fn append_diagnostic(buffer: &mut String, text: &str) {
+    const MAX_DIAGNOSTIC_BYTES: usize = 32 * 1024;
+    buffer.push_str(text);
+    if buffer.len() > MAX_DIAGNOSTIC_BYTES {
+        let mut start = buffer.len() - MAX_DIAGNOSTIC_BYTES;
+        while start < buffer.len() && !buffer.is_char_boundary(start) {
+            start += 1;
+        }
+        buffer.drain(..start);
+    }
+}
+
+fn download_failure_message(stderr: &str, code: Option<i32>) -> String {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("http error 403") || lower.contains("server returned 403") {
+        return "YouTube 拒绝了媒体数据请求（HTTP 403）。请重试；如持续失败，请更新应用或检查代理设置。".into();
+    }
+    if lower.contains("http error 429") || lower.contains("too many requests") {
+        return "YouTube 暂时限制了当前网络的请求（HTTP 429），请稍后重试或更换代理节点。".into();
+    }
+    if lower.contains("timed out") || lower.contains("connection reset") || lower.contains("unable to download") {
+        return "下载过程中网络连接中断，已完成的部分文件会保留，请直接重试以断点续传。".into();
+    }
+    if lower.contains("requested format is not available") {
+        return "所选画质当前不可用，请改用其他画质后重试。".into();
+    }
+    if lower.contains("ffmpeg") && (lower.contains("not found") || lower.contains("error")) {
+        return "FFmpeg 合并或转换失败，请重新安装最新版应用后重试。".into();
+    }
+    if lower.contains("sign in") || lower.contains("age-restricted") {
+        return "该视频需要登录或存在年龄限制，Streamnest 不会绕过此限制。".into();
+    }
+    if let Some(message) = stderr.lines().rev().map(str::trim).find(|line| line.starts_with("ERROR:")) {
+        return format!("下载失败：{}", message.trim_start_matches("ERROR:").trim());
+    }
+    format!(
+        "下载进程退出，代码：{}",
+        code.map(|value| value.to_string()).unwrap_or_else(|| "未知".into())
+    )
 }
 
 fn ffmpeg_location() -> PathBuf {
@@ -361,5 +430,20 @@ mod tests {
         );
         assert!(args.windows(2).any(|pair| pair == ["--proxy", "socks5://127.0.0.1:1080"]));
         assert_eq!(args.last().unwrap(), "https://www.youtube.com/watch?v=M7lc1UVf-VE");
+    }
+
+    #[test]
+    fn retries_transient_download_failures_and_ignores_user_config() {
+        let args = download_arguments(&task(DownloadPreset::Video720), &PathBuf::from("ffmpeg"), None);
+        assert!(args.contains(&"--ignore-config".to_string()));
+        assert!(args.windows(2).any(|pair| pair == ["--retries", "20"]));
+        assert!(args.windows(2).any(|pair| pair == ["--fragment-retries", "20"]));
+    }
+
+    #[test]
+    fn reports_the_real_download_failure_instead_of_only_the_exit_code() {
+        assert!(download_failure_message("ERROR: unable to download video data: HTTP Error 403", Some(1)).contains("HTTP 403"));
+        assert!(download_failure_message("ERROR: Requested format is not available", Some(1)).contains("画质"));
+        assert!(download_failure_message("ERROR: unexpected extractor failure", Some(1)).contains("unexpected extractor failure"));
     }
 }
