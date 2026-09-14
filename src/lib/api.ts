@@ -64,6 +64,11 @@ export async function chooseDownloadDirectory(): Promise<string | null> {
   return invoke("choose_download_directory");
 }
 
+export async function openDownloadDirectory(): Promise<void> {
+  if (!inTauri()) return;
+  return invoke("open_download_directory");
+}
+
 export function onTaskUpdated(callback: (task: DownloadTask) => void): Promise<UnlistenFn> {
   if (!inTauri()) return Promise.resolve(() => undefined);
   return listen<DownloadTask>("download-task-updated", (event) => callback(event.payload));

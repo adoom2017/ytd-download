@@ -10,9 +10,6 @@ use std::{
     process::Command,
 };
 
-#[cfg(target_os = "windows")]
-use std::ffi::OsString;
-
 use chrono::Utc;
 use downloader::{ControlAction, Scheduler};
 use models::{
@@ -270,6 +267,16 @@ async fn choose_download_directory(state: State<'_, Scheduler>) -> AppResult<Opt
 }
 
 #[tauri::command]
+fn open_download_directory(state: State<'_, Scheduler>) -> AppResult<()> {
+    let directory = PathBuf::from(output_directory(state.database())?);
+    if !directory.is_absolute() {
+        return Err(AppError::Validation("下载目录必须是绝对路径".into()));
+    }
+    fs::create_dir_all(&directory)?;
+    open_path(&directory, false)
+}
+
+#[tauri::command]
 fn open_output_path(state: State<'_, Scheduler>, task_id: String, reveal: bool) -> AppResult<()> {
     let task = state.database().task(&task_id)?;
     let output = task.output_path.as_ref().map(PathBuf::from);
@@ -446,17 +453,20 @@ fn user_facing_tool_error(stderr: &str) -> String {
 fn open_path(path: &Path, reveal: bool) -> AppResult<()> {
     #[cfg(target_os = "windows")]
     {
-        if reveal {
-            // Explorer can return a non-zero exit code after successfully
-            // handing the request to an existing Explorer process. Spawning
-            // is the reliable success boundary; Command also quotes paths
-            // containing spaces or non-ASCII text.
+        let directory = if path.is_dir() {
+            Some(path)
+        } else if reveal {
+            path.parent()
+        } else {
+            None
+        };
+        if let Some(directory) = directory {
+            // Pass the directory as its own process argument. Command performs
+            // the required quoting for spaces and non-ASCII text.
             Command::new("explorer.exe")
-                .arg(windows_reveal_argument(path))
+                .arg(directory)
                 .spawn()
-                .map_err(|error| {
-                    AppError::Runtime(format!("系统无法打开文件所在位置：{error}"))
-                })?;
+                .map_err(|error| AppError::Runtime(format!("系统无法打开下载目录：{error}")))?;
             return Ok(());
         }
         open::that(path)
@@ -487,13 +497,6 @@ fn open_path(path: &Path, reveal: bool) -> AppResult<()> {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn windows_reveal_argument(path: &Path) -> OsString {
-    let mut argument = OsString::from("/select,");
-    argument.push(path.as_os_str());
-    argument
-}
-
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -519,6 +522,7 @@ pub fn run() {
             clear_completed_tasks,
             delete_task,
             choose_download_directory,
+            open_download_directory,
             open_output_path,
             get_settings,
             update_settings,
@@ -533,11 +537,11 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn preserves_spaces_and_unicode_in_explorer_reveal_argument() {
+    fn resolves_the_parent_directory_for_a_revealed_file() {
         let path = Path::new(r"C:\Users\测试\YouTube Downloads\中文 视频.mp4");
         assert_eq!(
-            windows_reveal_argument(path),
-            OsString::from(r"/select,C:\Users\测试\YouTube Downloads\中文 视频.mp4")
+            path.parent(),
+            Some(Path::new(r"C:\Users\测试\YouTube Downloads"))
         );
     }
 

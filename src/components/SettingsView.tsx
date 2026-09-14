@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, ChevronRight, FolderOpen, Info, Monitor, Moon, Network, Save, ShieldCheck, Sun } from "lucide-react";
-import { chooseDownloadDirectory } from "../lib/api";
+import { chooseDownloadDirectory, openDownloadDirectory } from "../lib/api";
 import type { AppSettings, ThemeMode } from "../types";
 
 interface SettingsViewProps {
@@ -21,6 +21,14 @@ export function SettingsView({ settings, onUpdate, onError }: SettingsViewProps)
     try {
       const directory = await chooseDownloadDirectory();
       if (directory) await onUpdate({ outputDirectory: directory });
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function openFolder() {
+    try {
+      await openDownloadDirectory();
     } catch (reason) {
       onError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -69,9 +77,14 @@ export function SettingsView({ settings, onUpdate, onError }: SettingsViewProps)
 
         <section className="settings-card">
           <div className="settings-card-title"><span><FolderOpen size={19} /></span><div><h2>下载位置</h2><p>新任务会保存到此文件夹</p></div></div>
-          <button className="path-picker" type="button" onClick={() => void chooseFolder()}>
-            <span>{settings.outputDirectory}</span><ChevronRight size={18} />
-          </button>
+          <div className="path-actions">
+            <button className="path-picker" type="button" aria-label="更改下载位置" onClick={() => void chooseFolder()}>
+              <span>{settings.outputDirectory}</span><ChevronRight size={18} />
+            </button>
+            <button className="secondary-button directory-open-button" type="button" onClick={() => void openFolder()}>
+              <FolderOpen size={16} /> 打开目录
+            </button>
+          </div>
         </section>
 
         <section className="settings-card">
