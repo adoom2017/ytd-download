@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::{
     models::{DownloadTask, TaskStatus},
-    output::resolve_output_path,
+    output::{delete_downloaded_file, resolve_output_path},
     AppError, AppResult,
 };
 
@@ -173,7 +173,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn delete_task(&self, id: &str) -> AppResult<()> {
+    pub fn delete_task(&self, id: &str, delete_file: bool) -> AppResult<()> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let task = self.task(id)?;
         if !matches!(
             task.status,
@@ -183,8 +185,11 @@ impl Database {
                 "只能删除已完成、失败或已取消的任务记录".into(),
             ));
         }
-        self.connect()?
-            .execute("DELETE FROM tasks WHERE id=?1", [id])?;
+        if delete_file {
+            delete_downloaded_file(&task, &self.list_tasks()?)?;
+        }
+        transaction.execute("DELETE FROM tasks WHERE id=?1", [id])?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -242,6 +247,67 @@ mod tests {
     }
 
     #[test]
+    fn optional_file_deletion_removes_only_the_recorded_file() {
+        for delete_file in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let output = temp.path().join("downloads");
+            fs::create_dir(&output).unwrap();
+            let target = output.join("中文 视频.mp4");
+            let neighbor = output.join("其他视频.mp4");
+            fs::write(&target, b"download").unwrap();
+            fs::write(&neighbor, b"keep").unwrap();
+            let db = Database::open(&temp.path().join("data")).unwrap();
+            let mut task = sample_task(TaskStatus::Completed);
+            task.output_directory = output.to_string_lossy().into_owned();
+            task.output_path = Some(target.to_string_lossy().into_owned());
+            db.insert_task(&task).unwrap();
+            db.delete_task(&task.id, delete_file).unwrap();
+            assert!(db.task(&task.id).is_err());
+            assert_eq!(target.exists(), !delete_file);
+            assert!(neighbor.exists());
+            assert!(output.exists());
+        }
+    }
+
+    #[test]
+    fn refuses_an_outside_file_and_keeps_the_task_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("downloads");
+        fs::create_dir(&output).unwrap();
+        let target = temp.path().join("unrelated.mp4");
+        fs::write(&target, b"keep").unwrap();
+        let db = Database::open(&temp.path().join("data")).unwrap();
+        let mut task = sample_task(TaskStatus::Completed);
+        task.output_directory = output.to_string_lossy().into_owned();
+        task.output_path = Some(target.to_string_lossy().into_owned());
+        db.insert_task(&task).unwrap();
+        assert!(db.delete_task(&task.id, true).is_err());
+        assert!(db.task(&task.id).is_ok());
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn refuses_a_shared_file_but_allows_removing_a_missing_file_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("shared.mp4");
+        fs::write(&target, b"keep").unwrap();
+        let db = Database::open(&temp.path().join("data")).unwrap();
+        let mut task = sample_task(TaskStatus::Completed);
+        task.output_directory = temp.path().to_string_lossy().into_owned();
+        task.output_path = Some(target.to_string_lossy().into_owned());
+        db.insert_task(&task).unwrap();
+        let mut other = task.clone();
+        other.id = "task-2".into();
+        db.insert_task(&other).unwrap();
+        assert!(db.delete_task(&task.id, true).is_err());
+        assert!(target.exists());
+        assert!(db.task(&task.id).is_ok());
+        fs::remove_file(&target).unwrap();
+        db.delete_task(&task.id, true).unwrap();
+        assert!(db.task(&task.id).is_err());
+    }
+
+    #[test]
     fn recovers_active_tasks_as_paused() {
         let temp = tempfile::tempdir().unwrap();
         let db = Database::open(temp.path()).unwrap();
@@ -279,7 +345,7 @@ mod tests {
         completed_db
             .insert_task(&sample_task(TaskStatus::Completed))
             .unwrap();
-        completed_db.delete_task("task-1").unwrap();
+        completed_db.delete_task("task-1", false).unwrap();
         assert!(completed_db.task("task-1").is_err());
 
         let active_dir = tempfile::tempdir().unwrap();
@@ -287,6 +353,6 @@ mod tests {
         active_db
             .insert_task(&sample_task(TaskStatus::Queued))
             .unwrap();
-        assert!(active_db.delete_task("task-1").is_err());
+        assert!(active_db.delete_task("task-1", true).is_err());
     }
 }

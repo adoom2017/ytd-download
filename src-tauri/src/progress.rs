@@ -20,10 +20,20 @@ pub fn parse_output_line(line: &str) -> ParsedLine {
     if let Some(payload) = clean.strip_prefix(PROGRESS_PREFIX) {
         let values: Vec<_> = payload.split('|').collect();
         if values.len() >= 6 {
+            let downloaded_bytes = parse_u64(values[1]);
+            let total_bytes = parse_u64(values[2])
+                .filter(|total| *total > 0)
+                .or_else(|| parse_u64(values[3]).filter(|total| *total > 0));
+            let percent = match (downloaded_bytes, total_bytes) {
+                (Some(downloaded), Some(total)) => {
+                    (downloaded as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
+                }
+                _ => parse_percent(values[0]),
+            };
             return ParsedLine::Progress(TaskProgress {
-                percent: parse_percent(values[0]),
-                downloaded_bytes: parse_u64(values[1]),
-                total_bytes: parse_u64(values[2]).or_else(|| parse_u64(values[3])),
+                percent,
+                downloaded_bytes,
+                total_bytes,
                 speed_bytes_per_second: parse_f64(values[4]),
                 eta_seconds: parse_f64(values[5]),
                 stage: "正在下载".into(),
@@ -56,7 +66,11 @@ fn parse_u64(value: &str) -> Option<u64> {
     if value.is_empty() || value == "NA" || value == "None" {
         None
     } else {
-        value.parse().ok()
+        value
+            .parse::<f64>()
+            .ok()
+            .filter(|number| number.is_finite() && *number >= 0.0)
+            .map(|number| number as u64)
     }
 }
 
@@ -65,7 +79,10 @@ fn parse_f64(value: &str) -> Option<f64> {
     if value.is_empty() || value == "NA" || value == "None" {
         None
     } else {
-        value.parse().ok()
+        value
+            .parse::<f64>()
+            .ok()
+            .filter(|number| number.is_finite() && *number >= 0.0)
     }
 }
 
@@ -90,6 +107,32 @@ mod tests {
         match parse_output_line("__STREAMNEST_FILE__C:/Downloads/test.mp4") {
             ParsedLine::File(path) => assert!(path.ends_with("test.mp4")),
             _ => panic!("expected file"),
+        }
+    }
+
+    #[test]
+    fn derives_progress_from_numeric_bytes_when_percent_is_unavailable() {
+        match parse_output_line("__STREAMNEST_PROGRESS__NA|425|NA|1e3|2e2|3") {
+            ParsedLine::Progress(progress) => {
+                assert_eq!(progress.percent, 42.5);
+                assert_eq!(progress.total_bytes, Some(1000));
+                assert_eq!(progress.speed_bytes_per_second, Some(200.0));
+            }
+            _ => panic!("expected progress"),
+        }
+    }
+
+    #[test]
+    fn handles_unknown_totals_and_non_finite_metrics() {
+        match parse_output_line("__STREAMNEST_PROGRESS__NA|1024|0|NA|NaN|inf") {
+            ParsedLine::Progress(progress) => {
+                assert_eq!(progress.percent, 0.0);
+                assert_eq!(progress.downloaded_bytes, Some(1024));
+                assert_eq!(progress.total_bytes, None);
+                assert_eq!(progress.speed_bytes_per_second, None);
+                assert_eq!(progress.eta_seconds, None);
+            }
+            _ => panic!("expected progress"),
         }
     }
 }

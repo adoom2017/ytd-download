@@ -122,8 +122,10 @@ impl Scheduler {
         let mut child = Some(child);
         let mut stderr = String::new();
 
-        task.status = TaskStatus::Downloading;
-        task.progress.stage = "正在下载".into();
+        task.status = TaskStatus::Resolving;
+        task.progress.speed_bytes_per_second = None;
+        task.progress.eta_seconds = None;
+        task.progress.stage = "正在解析媒体信息".into();
         task.updated_at = Utc::now().to_rfc3339();
         let _ = self.persist_emit(&app, &task);
 
@@ -158,7 +160,7 @@ impl Scheduler {
                         break;
                     };
                     match event {
-                        CommandEvent::Stdout(bytes) => {
+                        CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
                             let text = String::from_utf8_lossy(&bytes);
                             for line in text.lines() {
                                 match parse_output_line(line) {
@@ -171,6 +173,8 @@ impl Scheduler {
                                     ParsedLine::Processing(stage) => {
                                         task.status = TaskStatus::Processing;
                                         task.progress.percent = 100.0;
+                                        task.progress.speed_bytes_per_second = None;
+                                        task.progress.eta_seconds = None;
                                         task.progress.stage = stage;
                                         task.updated_at = Utc::now().to_rfc3339();
                                         let _ = self.persist_emit(&app, &task);
@@ -178,20 +182,7 @@ impl Scheduler {
                                     ParsedLine::File(path) => {
                                         task.output_path = Some(path);
                                     }
-                                    ParsedLine::Ignore => {}
-                                }
-                            }
-                        }
-                        CommandEvent::Stderr(bytes) => {
-                            let text = String::from_utf8_lossy(&bytes);
-                            append_diagnostic(&mut stderr, &text);
-                            for line in text.lines() {
-                                if let ParsedLine::Processing(stage) = parse_output_line(line) {
-                                    task.status = TaskStatus::Processing;
-                                    task.progress.percent = 100.0;
-                                    task.progress.stage = stage;
-                                    task.updated_at = Utc::now().to_rfc3339();
-                                    let _ = self.persist_emit(&app, &task);
+                                    ParsedLine::Ignore => append_diagnostic(&mut stderr, line),
                                 }
                             }
                         }
@@ -304,6 +295,12 @@ pub fn download_arguments(
         "--encoding".into(),
         "utf-8".into(),
         "--newline".into(),
+        // --print implies quiet/no-progress unless these are explicitly enabled.
+        "--no-quiet".into(),
+        "--progress".into(),
+        "--no-colors".into(),
+        "--progress-delta".into(),
+        "0.2".into(),
         "--continue".into(),
         "--no-overwrites".into(),
         "--no-playlist".into(),
@@ -383,6 +380,7 @@ fn add_video_preset(args: &mut Vec<String>, height: u16) {
 fn append_diagnostic(buffer: &mut String, text: &str) {
     const MAX_DIAGNOSTIC_BYTES: usize = 32 * 1024;
     buffer.push_str(text);
+    buffer.push('\n');
     if buffer.len() > MAX_DIAGNOSTIC_BYTES {
         let mut start = buffer.len() - MAX_DIAGNOSTIC_BYTES;
         while start < buffer.len() && !buffer.is_char_boundary(start) {
@@ -546,6 +544,9 @@ mod tests {
             None,
         );
         assert!(args.contains(&"--ignore-config".to_string()));
+        assert!(args.contains(&"--progress".to_string()));
+        assert!(args.contains(&"--no-quiet".to_string()));
+        assert!(args.contains(&"--no-colors".to_string()));
         assert!(args.windows(2).any(|pair| pair == ["--encoding", "utf-8"]));
         assert!(args.windows(2).any(|pair| pair == ["--retries", "20"]));
         assert!(args

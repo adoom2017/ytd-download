@@ -22,6 +22,10 @@
       }
     ],
     "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      },
       "csp": "default-src 'self' customprotocol: asset:; img-src 'self' asset: https://i.ytimg.com https://*.ytimg.com data:; frame-src https://www.youtube-nocookie.com https://www.youtube.com; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost; media-src 'self' asset: blob:;"
     }
   },
@@ -38,4 +42,3 @@
     "resources": ["THIRD_PARTY_NOTICES.md"]
   }
 }
-

@@ -48,6 +48,13 @@ export function SettingsView({ settings, onUpdate, onError }: SettingsViewProps)
 
   return (
     <section className="page-section settings-page" id="main-content">
+      <header className="page-header">
+        <div>
+          <span className="eyebrow">PREFERENCES</span>
+          <h1>设置</h1>
+          <p>调整下载偏好，让 Streamnest 更适合你。</p>
+        </div>
+      </header>
       <div className="settings-grid">
         <section className="settings-card proxy-settings">
           <div className="settings-card-title">

@@ -1,8 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppSettings, DownloadRequest, DownloadTask, VideoDetails, VideoSummary } from "../types";
 
 const inTauri = () => "__TAURI_INTERNALS__" in window;
+
+export function mediaSource(path: string): string {
+  return inTauri() ? convertFileSrc(path) : path;
+}
 let demoSettings: AppSettings = {
   outputDirectory: "~/Downloads/YouTube Downloads",
   proxyUrl: "",
@@ -12,17 +16,17 @@ let demoSettings: AppSettings = {
   ffmpegVersion: "浏览器预览",
 };
 
-export async function searchVideos(query: string): Promise<VideoSummary[]> {
-  if (!inTauri()) return demoSearch(query);
-  return invoke("search_videos", { query });
+export async function searchVideos(query: string, music = false): Promise<VideoSummary[]> {
+  if (!inTauri()) return demoSearch(query, music);
+  return invoke("search_videos", { query, music });
 }
 
-export async function getVideoDetails(videoId: string): Promise<VideoDetails> {
+export async function getVideoDetails(videoId: string, music = false): Promise<VideoDetails> {
   if (!inTauri()) {
-    const video = (await demoSearch(videoId))[0];
+    const video = (await demoSearch(videoId, music))[0];
     return { ...video, description: "浏览器预览模式使用示例数据。桌面应用中会显示真实视频详情。" };
   }
-  return invoke("get_video_details", { videoId });
+  return invoke("get_video_details", { videoId, music });
 }
 
 export async function enqueueDownloads(requests: DownloadRequest[]): Promise<DownloadTask[]> {
@@ -36,6 +40,10 @@ export async function listTasks(): Promise<DownloadTask[]> {
 
 export async function taskAction(action: "pause" | "resume" | "cancel" | "retry" | "delete", taskId: string): Promise<void> {
   return invoke(`${action}_task`, { taskId });
+}
+
+export async function deleteTask(taskId: string, deleteFile = false): Promise<void> {
+  return invoke("delete_task", { taskId, deleteFile });
 }
 
 export async function openOutputPath(taskId: string, reveal: boolean): Promise<void> {
@@ -74,7 +82,7 @@ export function onTaskUpdated(callback: (task: DownloadTask) => void): Promise<U
   return listen<DownloadTask>("download-task-updated", (event) => callback(event.payload));
 }
 
-async function demoSearch(query: string): Promise<VideoSummary[]> {
+async function demoSearch(query: string, music = false): Promise<VideoSummary[]> {
   await new Promise((resolve) => setTimeout(resolve, 420));
   if (!query.trim()) return [];
   return [
@@ -84,7 +92,7 @@ async function demoSearch(query: string): Promise<VideoSummary[]> {
       channel: "YouTube Developers",
       durationSeconds: 94,
       thumbnailUrl: "https://i.ytimg.com/vi/M7lc1UVf-VE/hqdefault.jpg",
-      webpageUrl: "https://www.youtube.com/watch?v=M7lc1UVf-VE",
+      webpageUrl: `https://${music ? "music." : "www."}youtube.com/watch?v=M7lc1UVf-VE`,
     },
     {
       id: "aqz-KE-bpKQ",
@@ -92,7 +100,7 @@ async function demoSearch(query: string): Promise<VideoSummary[]> {
       channel: "Blender Foundation",
       durationSeconds: 634,
       thumbnailUrl: "https://i.ytimg.com/vi/aqz-KE-bpKQ/hqdefault.jpg",
-      webpageUrl: "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+      webpageUrl: `https://${music ? "music." : "www."}youtube.com/watch?v=aqz-KE-bpKQ`,
     },
   ];
 }

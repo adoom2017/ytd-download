@@ -52,6 +52,7 @@ async fn search_videos(
     app: tauri::AppHandle,
     state: State<'_, Scheduler>,
     query: String,
+    music: Option<bool>,
 ) -> AppResult<Vec<VideoSummary>> {
     let query = query.trim();
     if query.is_empty() || query.chars().count() > 200 {
@@ -66,7 +67,12 @@ async fn search_videos(
         "--no-warnings".to_string(),
     ];
     append_proxy_args(&mut args, configured_proxy(state.database())?);
-    args.push(format!("ytsearch30:{query}"));
+    let search_target = if music.unwrap_or(false) {
+        youtube_music_search_url(query)?
+    } else {
+        format!("ytsearch30:{query}")
+    };
+    args.push(search_target);
     let output = app
         .shell()
         .sidecar("yt-dlp")
@@ -95,9 +101,14 @@ async fn get_video_details(
     app: tauri::AppHandle,
     state: State<'_, Scheduler>,
     video_id: String,
+    music: Option<bool>,
 ) -> AppResult<VideoDetails> {
     validate_video_id(&video_id)?;
-    let url = format!("https://www.youtube.com/watch?v={video_id}");
+    let url = if music.unwrap_or(false) {
+        format!("https://music.youtube.com/watch?v={video_id}")
+    } else {
+        format!("https://www.youtube.com/watch?v={video_id}")
+    };
     let mut args = vec![
         "--dump-single-json".to_string(),
         "--skip-download".to_string(),
@@ -123,9 +134,12 @@ async fn get_video_details(
     let upload_date = raw.upload_date.clone();
     let view_count = raw.view_count;
     let is_embeddable = raw.playable_in_embed;
-    let summary = raw
+    let mut summary = raw
         .into_summary()
         .ok_or_else(|| AppError::Runtime("无法识别该视频".into()))?;
+    if music.unwrap_or(false) {
+        summary.webpage_url = format!("https://music.youtube.com/watch?v={video_id}");
+    }
     Ok(VideoDetails {
         summary,
         description,
@@ -244,8 +258,14 @@ fn clear_completed_tasks(state: State<'_, Scheduler>) -> AppResult<()> {
 }
 
 #[tauri::command]
-fn delete_task(state: State<'_, Scheduler>, task_id: String) -> AppResult<()> {
-    state.database().delete_task(&task_id)
+fn delete_task(
+    state: State<'_, Scheduler>,
+    task_id: String,
+    delete_file: Option<bool>,
+) -> AppResult<()> {
+    state
+        .database()
+        .delete_task(&task_id, delete_file.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -382,6 +402,14 @@ fn append_proxy_args(args: &mut Vec<String>, proxy_url: Option<String>) {
     if let Some(proxy_url) = proxy_url {
         args.extend(["--proxy".into(), proxy_url]);
     }
+}
+
+fn youtube_music_search_url(query: &str) -> AppResult<String> {
+    let mut url = url::Url::parse("https://music.youtube.com/search")
+        .expect("valid YouTube Music search URL");
+    url.query_pairs_mut().append_pair("q", query);
+    url.set_fragment(Some("songs"));
+    Ok(url.into())
 }
 
 fn normalize_proxy_url(value: &str) -> AppResult<String> {
@@ -573,5 +601,11 @@ mod tests {
         assert!(normalize_proxy_url("ftp://127.0.0.1:21").is_err());
         assert!(normalize_proxy_url("http://user:secret@127.0.0.1:7890").is_err());
         assert!(normalize_proxy_url("http://:7890").is_err());
+    }
+
+    #[test]
+    fn builds_a_youtube_music_song_search_url() {
+        let url = youtube_music_search_url("周杰伦 稻香").unwrap();
+        assert_eq!(url, "https://music.youtube.com/search?q=%E5%91%A8%E6%9D%B0%E4%BC%A6+%E7%A8%BB%E9%A6%99#songs");
     }
 }

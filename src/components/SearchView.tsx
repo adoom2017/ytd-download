@@ -40,7 +40,7 @@ export function SearchView({ settings, onQueued, onNeedRights, onError }: Search
       // Let React commit and WebView paint the busy state before starting the
       // comparatively expensive desktop IPC/sidecar request.
       await waitForLoadingPaint();
-      updateSearchSession({ results: await searchVideos(value) });
+      updateSearchSession({ results: await searchVideos(value, musicMode) });
     } catch (reason) {
       updateSearchSession({
         results: [],
@@ -63,7 +63,7 @@ export function SearchView({ settings, onQueued, onNeedRights, onError }: Search
     setPreview(video);
     setDetailLoading(true);
     try {
-      setPreview(await getVideoDetails(video.id));
+      setPreview(await getVideoDetails(video.id, isMusicSource(video.webpageUrl)));
     } catch {
       setPreview(video);
     } finally {
@@ -130,7 +130,7 @@ export function SearchView({ settings, onQueued, onNeedRights, onError }: Search
             </button>
           ) : null}
           <button className="primary-button search-submit" type="submit" disabled={!query.trim() || loading} aria-busy={loading}>
-            {loading ? <span className="search-spinner" aria-hidden="true" /> : null}
+            {loading ? <span className="search-spinner" aria-hidden="true" /> : <Search size={17} aria-hidden="true" />}
             {loading ? "正在搜索" : copy.searchAction}
           </button>
         </form>
@@ -160,7 +160,7 @@ export function SearchView({ settings, onQueued, onNeedRights, onError }: Search
             <div className="results-toolbar">
               <div>
                 <strong>{results.length} 个结果</strong>
-                <span>来自 YouTube</span>
+                <span>来自 {sourceLabel(results[0]?.webpageUrl)}</span>
               </div>
               <label className="check-label">
                 <input
@@ -209,12 +209,12 @@ export function SearchView({ settings, onQueued, onNeedRights, onError }: Search
           </div>
           <div className="preview-body">
             {detailLoading ? <div className="inline-loading"><LoaderCircle className="spin" size={16} /> 正在加载详情</div> : null}
-            <span className="source-pill">YouTube</span>
+            <span className="source-pill">{sourceLabel(preview.webpageUrl)}</span>
             <h2>{preview.title}</h2>
             <p className="preview-channel">{preview.channel} · {formatDuration(preview.durationSeconds)}</p>
             {"description" in preview && preview.description ? <p className="preview-description">{preview.description}</p> : null}
             <a className="external-link" href={preview.webpageUrl} target="_blank" rel="noreferrer">
-              <ExternalLink size={16} /> 在 YouTube 中打开
+              <ExternalLink size={16} /> 在 {sourceLabel(preview.webpageUrl)} 中打开
             </a>
           </div>
           <div className="preview-actions">
@@ -278,7 +278,7 @@ function VideoCard({ video, selected, musicMode, onToggle, onPreview, onDownload
       <div className="video-meta">
         <button className="video-title" type="button" onClick={onPreview}>{video.title}</button>
         <p>{video.channel}</p>
-        <span className="video-source"><span /> YouTube</span>
+        <span className="video-source"><span /> {sourceLabel(video.webpageUrl)}</span>
       </div>
       <div className="card-actions">
         <button type="button" className="secondary-button compact" onClick={onPreview}><Play size={16} /> {copy.preview}</button>
@@ -322,6 +322,18 @@ function EmptySearch({ musicMode }: { musicMode: boolean }) {
       </div>
     </div>
   );
+}
+
+function sourceLabel(webpageUrl: string): "YouTube" | "YouTube Music" {
+  return isMusicSource(webpageUrl) ? "YouTube Music" : "YouTube";
+}
+
+function isMusicSource(webpageUrl: string): boolean {
+  try {
+    return new URL(webpageUrl).hostname === "music.youtube.com";
+  } catch {
+    return false;
+  }
 }
 
 function SearchSkeleton() {

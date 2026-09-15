@@ -21,10 +21,11 @@ export function Sidebar({ active, activeTasks, onNavigate }: SidebarProps) {
         <span className="brand-mark" aria-hidden="true"><ArrowDownToLine size={20} strokeWidth={2.1} /></span>
         <span>
           <strong>{copy.appName}</strong>
-          <small>DESKTOP</small>
+          <small>你的媒体收藏空间</small>
         </span>
       </div>
 
+      <span className="nav-caption">工作空间</span>
       <nav className="nav-list">
         {entries.map(({ id, label, icon: Icon }) => (
           <button
@@ -32,6 +33,7 @@ export function Sidebar({ active, activeTasks, onNavigate }: SidebarProps) {
             type="button"
             className={`nav-item ${active === id ? "is-active" : ""}`}
             aria-current={active === id ? "page" : undefined}
+            aria-label={label}
             onClick={() => onNavigate(id)}
           >
             <Icon size={19} strokeWidth={1.8} />

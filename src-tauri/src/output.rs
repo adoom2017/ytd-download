@@ -1,6 +1,57 @@
 use std::{fs, path::PathBuf, time::SystemTime};
 
-use crate::models::DownloadTask;
+use crate::{models::DownloadTask, AppError, AppResult};
+
+/// Only remove the recorded output, never infer ownership from a video ID or
+/// recursively remove a download directory (other tasks can share both).
+pub fn delete_downloaded_file(task: &DownloadTask, tasks: &[DownloadTask]) -> AppResult<()> {
+    let Some(path) = task.output_path.as_deref().map(PathBuf::from) else {
+        return Ok(());
+    };
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(AppError::Validation(
+            "输出路径不是普通文件，无法删除；可选择仅删除记录".into(),
+        ));
+    }
+    let directory = fs::canonicalize(&task.output_directory)?;
+    let target = fs::canonicalize(&path)?;
+    if target.parent() != Some(directory.as_path()) {
+        return Err(AppError::Validation(
+            "文件不在该任务的下载目录内；可选择仅删除记录".into(),
+        ));
+    }
+    let shared = tasks.iter().any(|other| {
+        other.id != task.id
+            && (other
+                .output_path
+                .as_deref()
+                .and_then(|path| fs::canonicalize(path).ok())
+                .as_ref()
+                == Some(&target)
+                || (other.video_id == task.video_id
+                    && matches!(
+                        other.status,
+                        crate::models::TaskStatus::Queued
+                            | crate::models::TaskStatus::Resolving
+                            | crate::models::TaskStatus::Downloading
+                            | crate::models::TaskStatus::Processing
+                            | crate::models::TaskStatus::Paused
+                    )
+                    && fs::canonicalize(&other.output_directory).ok().as_ref() == Some(&directory)))
+    });
+    if shared {
+        return Err(AppError::Validation(
+            "其他任务仍在使用此文件，请选择仅删除记录".into(),
+        ));
+    }
+    fs::remove_file(&target)?;
+    Ok(())
+}
 
 pub fn resolve_output_path(task: &DownloadTask) -> Option<PathBuf> {
     if let Some(path) = task.output_path.as_deref().map(PathBuf::from) {

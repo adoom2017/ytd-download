@@ -7,6 +7,7 @@ Streamnest 是一个面向 Windows 与 macOS 的私人视频搜索、预览和�
 ## 已实现能力
 
 - 关键词搜索最多 30 个 YouTube 视频，按需加载详情
+- 音乐模式从 YouTube Music 的歌曲区检索，并保留 Music 页面链接
 - `youtube-nocookie.com` 应用内播放预览与浏览器回退链接
 - 单个和批量下载，支持 MP4 360p/720p/1080p/最佳画质、M4A、MP3 192k
 - SQLite 持久化双并发队列，支持暂停、继续、取消和失败重试

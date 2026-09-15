@@ -142,6 +142,7 @@ pub struct YtSearchEnvelope {
 #[derive(Debug, Deserialize)]
 pub struct YtVideo {
     pub id: Option<String>,
+    pub url: Option<String>,
     pub title: Option<String>,
     pub channel: Option<String>,
     pub uploader: Option<String>,
@@ -163,6 +164,7 @@ impl YtVideo {
             webpage_url: self
                 .webpage_url
                 .or(self.original_url)
+                .or(self.url)
                 .unwrap_or_else(|| format!("https://www.youtube.com/watch?v={id}")),
             thumbnail_url: self
                 .thumbnail
